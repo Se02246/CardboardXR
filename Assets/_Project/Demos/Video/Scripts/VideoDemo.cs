@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using TMPro;
+using CardboardXR.Hands;
 using CardboardXR.UI;
 using UnityEngine;
 using UnityEngine.Video;
@@ -240,6 +241,18 @@ namespace CardboardXR.Demos.Video
             m_Texture = null;
         }
 
+        public override void OnDemoRefocus(CoreServices core)
+        {
+            if (core != null)
+                m_Core = core;
+            if (m_Panel != null && CardboardXR.Stereo.SpatialWindowAnchor.IsStowed(m_Panel))
+                CardboardXR.Stereo.SpatialWindowAnchor.SetFloatingStowed(false);
+            if (m_ControlsShown)
+                ShowControls();
+            else
+                ShowLibrary();
+        }
+
         // Where the head is looking, in degrees above (+) or below (-) the horizon.
         float HeadPitch => Mathf.Asin(Mathf.Clamp(m_Core.Head.forward.y, -1f, 1f)) * Mathf.Rad2Deg;
 
@@ -336,6 +349,7 @@ namespace CardboardXR.Demos.Video
 
             // The library: a list of videos, a page at a time.
             m_LibraryPage = WorldUi.CreateGroup("Library", m_Panel);
+            m_LibraryPage.gameObject.AddComponent<VideoLibraryScrollTarget>().Initialize(this);
             M3.Text("Header", m_LibraryPage, "Videos", M3Theme.Type.TitleLarge, new Vector2(-60f, 220f), new Vector2(432f, 32f),
                 alignment: TextAlignmentOptions.Left);
             M3.IconButton("Refresh", m_LibraryPage, "refresh", M3Button.Variant.Text, new Vector2(248f, 220f), () =>
@@ -391,7 +405,11 @@ namespace CardboardXR.Demos.Video
                 width);
         }
 
-        void Page(int step)
+        internal int LibraryCount => m_Library.Count;
+        internal int PageCount => Mathf.Max(1, (m_Library.Count + k_EntriesPerPage - 1) / k_EntriesPerPage);
+        internal bool IsShowingLibrary => m_ShowingLibrary;
+
+        internal void Page(int step)
         {
             m_Page += step;
             UpdateLibraryLabels();
@@ -402,5 +420,45 @@ namespace CardboardXR.Demos.Video
             var total = (int)System.Math.Max(0.0, seconds);
             return total >= 3600 ? $"{total / 3600}:{total / 60 % 60:00}:{total % 60:00}" : $"{total / 60}:{total % 60:00}";
         }
+    }
+
+    sealed class VideoLibraryScrollTarget : MonoBehaviour, IVisualScrollTarget
+    {
+        VideoDemo m_Demo;
+        RectTransform m_Rect;
+        float m_Accum;
+        float m_LastTurnAt = float.NegativeInfinity;
+
+        public RectTransform ScrollRectTransform => m_Rect;
+
+        public void Initialize(VideoDemo demo)
+        {
+            m_Demo = demo;
+            m_Rect = GetComponent<RectTransform>();
+        }
+
+        public bool CanVisualScroll => m_Demo != null && m_Demo.IsShowingLibrary && m_Demo.PageCount > 1 && m_Rect != null;
+
+        public void OnVisualTouchBegin(Vector2 localPoint) => m_Accum = 0f;
+
+        public void OnVisualTouchMove(Vector2 localPoint, Vector2 localDelta)
+        {
+            if (!CanVisualScroll)
+                return;
+            var primary = Mathf.Abs(localDelta.y) >= Mathf.Abs(localDelta.x) ? localDelta.y : -localDelta.x;
+            m_Accum += primary;
+            if (Mathf.Abs(m_Accum) < 65f)
+                return;
+            if (Time.unscaledTime - m_LastTurnAt < 0.28f)
+            {
+                m_Accum = 0f;
+                return;
+            }
+            m_LastTurnAt = Time.unscaledTime;
+            m_Demo.Page(m_Accum > 0f ? 1 : -1);
+            m_Accum = 0f;
+        }
+
+        public void OnVisualTouchEnd(Vector2 localPoint, bool cancelled) => m_Accum = 0f;
     }
 }

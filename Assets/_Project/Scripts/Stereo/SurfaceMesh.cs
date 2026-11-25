@@ -60,6 +60,12 @@ namespace CardboardXR.Stereo
 
         void Rebuild()
         {
+            if (m_Plane.alignment == PlaneAlignment.Vertical)
+            {
+                m_Mesh.Clear();
+                UpdateVisibility();
+                return;
+            }
             s_Boundary.Clear();
             foreach (var point in m_Plane.boundary)
                 s_Boundary.Add(point);
@@ -82,8 +88,8 @@ namespace CardboardXR.Stereo
 
         void UpdateVisibility()
         {
-            var visible = enabled && m_Mesh.vertexCount > 0 && m_Plane.trackingState != TrackingState.None &&
-                          m_Plane.subsumedBy == null;
+            var visible = enabled && m_Plane.alignment != PlaneAlignment.Vertical && m_Mesh.vertexCount > 0 &&
+                          m_Plane.trackingState != TrackingState.None && m_Plane.subsumedBy == null;
             if (m_Renderer.enabled != visible)
                 m_Renderer.enabled = visible;
         }

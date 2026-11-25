@@ -25,7 +25,7 @@ Shader "CardboardXR/Reticle"
             Name "Reticle"
             Tags { "LightMode" = "UniversalForward" }
 
-            Blend SrcAlpha OneMinusSrcAlpha
+            Blend SrcAlpha OneMinusSrcAlpha, One OneMinusSrcAlpha
             Cull Off
             ZWrite Off
             ZTest Always
@@ -74,7 +74,7 @@ Shader "CardboardXR/Reticle"
             half4 Frag(Varyings input) : SV_Target
             {
                 float radius = length(input.offset);
-                float pixel = max(fwidth(radius), 1e-5);
+                float pixel = clamp(fwidth(radius), 0.002, 0.15);
                 float fill = Band(radius, _Inner, _Outer, pixel) * _Color.a;
                 float edge = Band(radius, _Inner - _Outline, _Outer + _Outline, pixel) * _OutlineColor.a;
                 // The fill composited over its outline.

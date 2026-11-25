@@ -72,5 +72,16 @@ namespace CardboardXR.Stereo.Tests
             Assert.IsFalse(PinchInput.ShowHint(true, 0f, t), "hand in view");
             Assert.IsFalse(PinchInput.ShowHint(true, t, 0.5f * t), "only glanced at the button");
         }
+
+        [Test]
+        public void TheWatchMutesTheHandPinchOnlyWhereTheHandIsntNeeded()
+        {
+            // In the Editor the watch isn't connected, so the hand's pinch is never muted.
+            PinchRouter.SceneWantsHandPinch = false;
+            Assert.IsFalse(PinchRouter.HandPinchMuted);
+            PinchRouter.SceneWantsHandPinch = true;
+            Assert.IsFalse(PinchRouter.HandPinchMuted);
+            PinchRouter.SceneWantsHandPinch = false;
+        }
     }
 }

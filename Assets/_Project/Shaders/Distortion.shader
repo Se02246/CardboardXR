@@ -5,6 +5,9 @@ Shader "CardboardXR/Distortion"
     Properties
     {
         _MainTex ("Eye Texture", 2D) = "black" {}
+        _SrcBlend ("Src Blend", Float) = 1
+        _DstBlend ("Dst Blend", Float) = 0
+        _FlipY ("Flip Vertical UV", Float) = 0
     }
 
     SubShader
@@ -21,6 +24,7 @@ Shader "CardboardXR/Distortion"
             Name "Distortion"
             Tags { "LightMode" = "UniversalForward" }
 
+            Blend [_SrcBlend] [_DstBlend]
             Cull Off
             ZWrite Off
             ZTest Always
@@ -33,6 +37,10 @@ Shader "CardboardXR/Distortion"
 
             TEXTURE2D(_MainTex);
             SAMPLER(sampler_MainTex);
+
+            CBUFFER_START(UnityPerMaterial)
+                float _FlipY;
+            CBUFFER_END
 
             struct Attributes
             {
@@ -59,7 +67,8 @@ Shader "CardboardXR/Distortion"
 
             half4 Frag(Varyings input) : SV_Target
             {
-                return SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, input.uv);
+                float2 uv = _FlipY > 0.5 ? float2(input.uv.x, 1.0 - input.uv.y) : input.uv;
+                return SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, uv);
             }
             ENDHLSL
         }

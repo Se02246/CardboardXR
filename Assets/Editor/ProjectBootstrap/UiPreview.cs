@@ -98,28 +98,6 @@ namespace ProjectBootstrap
                 Render(camera, Path.Combine(folder, "paint.png"), 0f, 0f);
                 panel.gameObject.SetActive(false);
             }
-
-            var rush = Demo("CardboardXR.Demos.Rush.RushDemo, CardboardXR.Demos.Rush");
-            if (rush != null)
-            {
-                Call(rush, "BuildMenu");
-                Call(rush, "BuildPauseMenu");
-                Call(rush, "BuildHud");
-                ((TMP_Text)Get(rush, "m_MenuBody")).text = "Orbs fly toward you: hit them with your hand as they reach the rings.\n" +
-                                                           "Face the way you want to play, then press Start.\nBest score 1240";
-                var menu = Show(rush, "m_Menu", 1.6f, -8f);
-                Render(camera, Path.Combine(folder, "rush-menu.png"), -8f, 0f);
-                menu.gameObject.SetActive(false);
-                ((TMP_Text)Get(rush, "m_PauseBody")).text = "Score 860, 34 s left";
-                var pause = Show(rush, "m_PauseMenu", 1.6f, -8f);
-                Render(camera, Path.Combine(folder, "rush-pause.png"), -8f, 0f);
-                pause.gameObject.SetActive(false);
-                ((TMP_Text)Get(rush, "m_HudText")).text = "860    Combo 12 ×2    0:34";
-                ((TMP_Text)Get(rush, "m_Callout")).text = "Perfect";
-                ((TMP_Text)Get(rush, "m_Callout")).color = M3Theme.Primary;
-                Show(rush, "m_Hud", 2.4f, 10f);
-                Render(camera, Path.Combine(folder, "rush-hud.png"), 0f, 0f);
-            }
         }
 
         // Detected surfaces as a scan shows them: a floor and a table-height patch, mid-wave and after.

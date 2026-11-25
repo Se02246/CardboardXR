@@ -222,6 +222,7 @@ namespace CardboardXR.Stereo
             var canvas = canvasObject.GetComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             canvas.sortingOrder = 100;
+            canvas.additionalShaderChannels |= AdditionalCanvasShaderChannels.TexCoord1 | AdditionalCanvasShaderChannels.TexCoord2;
             var scaler = canvasObject.GetComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1920f, 1080f);
@@ -237,7 +238,8 @@ namespace CardboardXR.Stereo
             var corner = Frame("Corner", root, new Vector2(1f, 1f), new Vector2(-12f, -12f), new Vector2(40f, 40f));
             m_SettingsButton = M3.IconButton("Settings", corner, "settings", M3Button.Variant.Tonal, Vector2.zero, ToggleMenu, 40f).gameObject;
             var menuFrame = Frame("Menu Frame", root, new Vector2(1f, 1f), new Vector2(-12f, -60f), new Vector2(200f, 188f));
-            var menu = M3.Surface("Menu", menuFrame, Vector2.zero, new Vector2(200f, 188f), M3Theme.SurfaceContainer, M3Theme.k_ShapeSmall);
+            var menu = M3.Surface("Menu", menuFrame, Vector2.zero, new Vector2(200f, 188f), M3Theme.SurfaceContainerHigh,
+                M3Theme.k_ShapeDialog);
             M3.Button("Set viewer", menu.rectTransform, "Set viewer", M3Button.Variant.Text, new Vector2(0f, 60f), ChooseSetViewer,
                 "qr_code_scanner", 184f);
             m_View = M3.Button("View", menu.rectTransform, "Phone view", M3Button.Variant.Text, new Vector2(0f, 0f), ToggleView,
@@ -267,18 +269,19 @@ namespace CardboardXR.Stereo
             var scanRect = (RectTransform)m_ScanPanel.transform;
             var top = Frame("Top", scanRect, new Vector2(0.5f, 1f), new Vector2(0f, -16f), new Vector2(600f, 64f));
             var statusBar = M3.Surface("Status Bar", top, Vector2.zero, new Vector2(600f, 64f), M3Theme.SurfaceContainerHigh,
-                M3Theme.k_ShapeLarge);
+                M3Theme.k_ShapeFull);
             m_Status = M3.Text("Status", statusBar.rectTransform, "", M3Theme.Type.BodyLarge, Vector2.zero, new Vector2(568f, 56f));
             var actions = Frame("Actions", scanRect, new Vector2(0.5f, 0f), new Vector2(0f, 16f), new Vector2(420f, 56f));
             M3.Button("Cancel", actions, "Cancel", M3Button.Variant.Tonal, new Vector2(-110f, 0f), () => SetScanning(false), "close", 180f);
             M3.Button("Use Cardboard v1", actions, "Use Cardboard v1", M3Button.Variant.Filled, new Vector2(100f, 0f), UseCardboardV1,
                 null, 210f);
 
-            // A Material snackbar: inverse colors, low on the screen.
+            // A visionOS frosted glass pill toast low on the screen.
             var bottom = Frame("Snackbar Frame", root, new Vector2(0.5f, 0f), new Vector2(0f, 72f), new Vector2(560f, 56f));
-            var snackbar = M3.Surface("Snackbar", bottom, Vector2.zero, new Vector2(560f, 56f), M3Theme.InverseSurface, 4f);
-            m_Toast = M3.Text("Message", snackbar.rectTransform, "", M3Theme.Type.BodyMedium, Vector2.zero, new Vector2(528f, 48f),
-                M3Theme.InverseOnSurface, TextAlignmentOptions.Left);
+            var snackbar = M3.Surface("Snackbar", bottom, Vector2.zero, new Vector2(560f, 56f), M3Theme.SurfaceContainerHigh,
+                M3Theme.k_ShapeFull);
+            m_Toast = M3.Text("Message", snackbar.rectTransform, "", M3Theme.Type.BodyMedium, Vector2.zero, new Vector2(512f, 48f),
+                M3Theme.OnSurface, TextAlignmentOptions.Center);
             m_Snackbar = snackbar.gameObject;
             m_Snackbar.AddComponent<M3Fade>();
             m_Snackbar.SetActive(false);

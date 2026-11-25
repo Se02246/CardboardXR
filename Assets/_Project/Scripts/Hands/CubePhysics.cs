@@ -40,6 +40,8 @@ namespace CardboardXR.Hands
         XRGrabInteractable m_Grab;
         Rigidbody m_Body;
         Vector3 m_PickedUpAt;
+        Vector3 m_AnchoredPos;
+        bool m_MovedSinceAnchor;
         bool m_Frozen;
         // Free and not yet anchored where it came to rest.
         bool m_Settling;
@@ -56,8 +58,11 @@ namespace CardboardXR.Hands
         {
             m_Grab.selectEntered.AddListener(OnSelectEntered);
             m_Grab.selectExited.AddListener(OnSelectExited);
-            // Placed: it drops onto the surface and is anchored there once it's still.
+            // Placed cleanly onto its support surface: only re-anchor if grabbed, knocked, or moved.
+            m_AnchoredPos = transform.position;
+            m_MovedSinceAnchor = false;
             m_Settling = true;
+            m_StillFor = 0f;
         }
 
         void OnDisable()
@@ -90,6 +95,7 @@ namespace CardboardXR.Hands
             // Free: XRI put back the body as it was before the grab, which may have been frozen.
             m_Body.isKinematic = false;
             m_Body.useGravity = true;
+            m_MovedSinceAnchor = true;
             m_Settling = true;
             m_StillFor = 0f;
             m_ThrownAt = Time.time;
@@ -132,7 +138,12 @@ namespace CardboardXR.Hands
             if (m_StillFor < k_RestSeconds)
                 return;
             m_Settling = false;
-            Anchor();
+            if (m_MovedSinceAnchor || Vector3.Distance(transform.position, m_AnchoredPos) > 0.02f)
+            {
+                m_AnchoredPos = transform.position;
+                m_MovedSinceAnchor = false;
+                Anchor();
+            }
         }
 
         // Knocked by a moving object: frozen ones come free; resting ones settle again after.
@@ -147,6 +158,7 @@ namespace CardboardXR.Hands
                 m_Body.useGravity = true;
                 Debug.Log($"[Hands] {name} knocked free");
             }
+            m_MovedSinceAnchor = true;
             m_Settling = true;
             m_StillFor = 0f;
         }

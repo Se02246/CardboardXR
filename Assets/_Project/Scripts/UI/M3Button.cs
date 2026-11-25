@@ -46,12 +46,18 @@ namespace CardboardXR.UI
 
         public Button Button => m_Button;
         public TMP_Text Label => m_Label;
+        public Variant ButtonVariant => m_Variant;
+
+        public TMP_Text IconGraphic => m_Icon;
+        public Image Container => m_Container;
 
         public bool Selected
         {
             get => m_Selected;
             set
             {
+                if (m_Selected == value && m_Applied)
+                    return;
                 m_Selected = value;
                 Apply();
             }
@@ -62,6 +68,8 @@ namespace CardboardXR.UI
             get => m_Button.interactable;
             set
             {
+                if (m_Button != null && m_Button.interactable == value && m_Applied)
+                    return;
                 m_Button.interactable = value;
                 Apply();
             }
@@ -137,7 +145,7 @@ namespace CardboardXR.UI
                     : (Color.clear, M3Theme.Outline, M3Theme.Primary),
                 Variant.Text => (Color.clear, Color.clear, M3Theme.Primary),
                 Variant.Toolbar => selected
-                    ? (M3Theme.SecondaryContainer, Color.clear, M3Theme.OnSecondaryContainer)
+                    ? (M3Theme.Primary, Color.clear, M3Theme.OnPrimary)
                     : (Color.clear, Color.clear, M3Theme.OnSurfaceVariant),
                 Variant.Segment => selected
                     ? (M3Theme.Primary, Color.clear, M3Theme.OnPrimary)
@@ -169,7 +177,11 @@ namespace CardboardXR.UI
                     ? (m_Selected ? M3Theme.OnSurface : M3Theme.OnSurfaceVariant)
                     : content;
             if (m_StateLayer != null)
-                m_StateLayer.SetColor(m_Variant == Variant.Swatch ? M3Theme.OnSurface : content);
+            {
+                var lightContainer = m_Variant == Variant.Filled ||
+                    (m_Selected && m_Variant is Variant.Tonal or Variant.Segment or Variant.Toolbar or Variant.Outlined);
+                m_StateLayer.SetColor(lightContainer ? M3Theme.OnPrimary : Color.white);
+            }
             m_Applied = true;
         }
 

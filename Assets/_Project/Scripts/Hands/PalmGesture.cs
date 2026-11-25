@@ -48,10 +48,10 @@ namespace CardboardXR.Hands
     // as the hand turns.
     public class PalmFacingState
     {
-        public const float k_Show = 0.45f;
-        public const float k_Hide = 0.2f;
-        public const float k_ShowSeconds = 0.25f;
-        public const float k_HideSeconds = 0.3f;
+        public const float k_Show = 0.30f;
+        public const float k_Hide = 0.12f;
+        public const float k_ShowSeconds = 0.16f;
+        public const float k_HideSeconds = 0.38f;
 
         float m_For;
 

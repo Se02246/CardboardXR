@@ -22,6 +22,20 @@ namespace CardboardXR.Hands
             };
         }
 
+        // Centered square zoom crop of the camera image (1.78x magnification on 16:9 Ultrawide frames)
+        // so hands at arm's reach (45-85 cm) fill enough pixels for reliable palm detection.
+        public static Letterbox FitCenterSquare(int imageWidth, int imageHeight, int inputSize)
+        {
+            float cropSide = Mathf.Max(1, Mathf.Min(imageWidth, imageHeight));
+            var scale = inputSize / cropSide;
+            return new Letterbox
+            {
+                inputSize = inputSize,
+                scale = scale,
+                offset = new Vector2(-((imageWidth - cropSide) * 0.5f) * scale, -((imageHeight - cropSide) * 0.5f) * scale),
+            };
+        }
+
         // From the input's normalized coordinates to image pixels.
         public Vector2 ToImage(Vector2 normalized) => (normalized * inputSize - offset) / scale;
 

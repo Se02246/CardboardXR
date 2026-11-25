@@ -19,7 +19,7 @@ namespace ProjectBootstrap
             Tagline = "Paint in the air with your hand",
             Icon = "brush",
             Tint = new Color(0.48f, 0.31f, 0.75f),
-            Requirements = new DemoRequirements { SixDof = Need.On, Passthrough = Need.On, Hands = Need.On },
+            Requirements = new DemoRequirements { SixDof = Need.On, Passthrough = Need.On, Hands = Need.On, HandPinch = true },
         };
 
         public override void BuildScene(string folder)

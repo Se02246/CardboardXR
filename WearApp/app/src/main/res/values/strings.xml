@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CardboardXR Pinch</string>
+    <string name="start">Avvia</string>
+    <string name="stop">Ferma</string>
+    <string name="click">Click</string>
+    <string name="settings">Impostazioni VR</string>
+    <string name="minus">−</string>
+    <string name="plus">+</string>
+    <string name="status_idle">Premi Avvia, poi apri CardboardXR sul telefono</string>
+    <string name="status_waiting">In attesa di CardboardXR sul telefono…</string>
+    <string name="status_watch">Collegato: il doppio pinch fa click</string>
+    <string name="status_hand">Collegato. Questa app usa il pinch della mano; il doppio pinch fa comunque click</string>
+    <string name="sensitivity">Sensibilità %1$d/10</string>
+    <string name="meter_hint">Movimento: la soglia è a metà barra</string>
+    <string name="count">Doppi pinch: %1$d</string>
+    <string name="notification_channel">Sessione VR</string>
+    <string name="notification_text">Doppio pinch attivo</string>
+</resources>

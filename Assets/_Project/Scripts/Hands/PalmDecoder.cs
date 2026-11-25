@@ -62,9 +62,61 @@ namespace CardboardXR.Hands
             if (score < minScore)
                 return false;
 
-            var anchor = anchors[best];
-            var o = best * ValuesPerAnchor;
-            palm = new Palm
+            palm = DecodeAnchor(boxes, anchors, best, score);
+            return true;
+        }
+
+        // Prefers the user's closest real palm over small distant hands or background clutter.
+        public static bool TryDecodeNearestUserPalm(float[] boxes, float[] scores, Vector2[] anchors,
+            float minScore, float minPalmSizeNorm, out Palm palm)
+        {
+            palm = default;
+            var best = -1;
+            var bestPriority = float.NegativeInfinity;
+            var bestScore = 0f;
+
+            for (var i = 0; i < AnchorCount; i++)
+            {
+                var score = Sigmoid(scores[i]);
+                if (score < minScore)
+                    continue;
+
+                var o = i * ValuesPerAnchor;
+                var w = Mathf.Abs(boxes[o + 2]) / InputSize;
+                var h = Mathf.Abs(boxes[o + 3]) / InputSize;
+                var boxSize = Mathf.Max(w, h);
+                if (boxSize < minPalmSizeNorm || boxSize > 0.85f)
+                    continue;
+
+                var anchor = anchors[i];
+                var center = anchor + new Vector2(boxes[o], boxes[o + 1]) / InputSize;
+                var wrist = anchor + new Vector2(boxes[o + k_WristOffset], boxes[o + k_WristOffset + 1]) / InputSize;
+                var middleKnuckle = anchor + new Vector2(boxes[o + k_MiddleKnuckleOffset], boxes[o + k_MiddleKnuckleOffset + 1]) / InputSize;
+                // Other people's arms hanging upside down high in front of the viewer.
+                if (wrist.y < middleKnuckle.y - 0.02f && center.y < 0.58f)
+                    continue;
+
+                var priority = boxSize * (0.35f + score);
+                if (priority > bestPriority)
+                {
+                    bestPriority = priority;
+                    best = i;
+                    bestScore = score;
+                }
+            }
+
+            if (best < 0)
+                return false;
+
+            palm = DecodeAnchor(boxes, anchors, best, bestScore);
+            return true;
+        }
+
+        static Palm DecodeAnchor(float[] boxes, Vector2[] anchors, int index, float score)
+        {
+            var anchor = anchors[index];
+            var o = index * ValuesPerAnchor;
+            return new Palm
             {
                 score = score,
                 center = anchor + new Vector2(boxes[o], boxes[o + 1]) / InputSize,
@@ -72,7 +124,6 @@ namespace CardboardXR.Hands
                 wrist = anchor + new Vector2(boxes[o + k_WristOffset], boxes[o + k_WristOffset + 1]) / InputSize,
                 middleKnuckle = anchor + new Vector2(boxes[o + k_MiddleKnuckleOffset], boxes[o + k_MiddleKnuckleOffset + 1]) / InputSize,
             };
-            return true;
         }
 
         public static float Sigmoid(float x) => 1f / (1f + Mathf.Exp(-x));

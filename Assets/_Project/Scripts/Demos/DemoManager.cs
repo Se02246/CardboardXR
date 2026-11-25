@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Generic;
 using CardboardXR.Hands;
 using CardboardXR.Stereo;
 using UnityEngine;
@@ -6,25 +7,30 @@ using UnityEngine.SceneManagement;
 
 namespace CardboardXR.Demos
 {
-    // Moves between the lobby and the demos. The Core scene (rig, AR, hands, gaze) stays loaded the
-    // whole time, so tracking, placed anchors and the viewer's calibration carry across; the lobby
-    // and each demo are scenes loaded on top of it and unloaded on leaving. Entering a demo switches
-    // Core to what the demo needs (DemoRequirements) and leaving puts back what was on before, so the
-    // lobby is as the user left it. Going straight from one demo to another goes straight from one's
-    // needs to the next's, from what was on before the first: putting the lobby's 3DoF back in between
-    // turned AR off and on again, which restarted tracking. The "demo" launch option (an index into the catalog) starts in a
-    // demo instead of the lobby. Demos are picked in the app library (AppLibrary), from the lobby or
-    // from another demo. Nothing is placed on surfaces in the lobby, and entering a demo starts it with
-    // no objects placed. Lives in the Core scene.
+    // Moves between the lobby, exclusive full-room demos, and concurrent VisionOS-style windowed apps
+    // (Web Cinema, Schermi Live, Impostazioni, Torcia) which can ALL stay open simultaneously in the
+    // user's space. Each windowed app loads additively without fading to black or closing the others,
+    // and can be closed individually via CloseApp(id). Lives in the Core scene.
     public class DemoManager : MonoBehaviour
     {
+        static readonly HashSet<string> s_WindowedIds = new()
+        {
+            "browser",
+            "phoneapps",
+            "quadri",
+            "oggetti",
+            "streamcast",
+            "settings",
+        };
+
         [SerializeField] DemoCatalog m_Catalog;
         [SerializeField] CoreServices m_Core;
-        [Tooltip("The view fades through black between scenes, rather than cutting.")]
+        [Tooltip("The view fades through black between exclusive scenes, rather than cutting.")]
         [SerializeField] ScreenFade m_Fade;
 
         string m_LoadedScene;
         DemoCatalog.Entry m_Current;
+        readonly List<(DemoCatalog.Entry entry, string scenePath)> m_OpenWindows = new();
         CoreState m_BeforeDemo;
         GameObject m_DefaultPrefab;
         bool m_Busy;
@@ -35,14 +41,29 @@ namespace CardboardXR.Demos
         const float k_FadeInSeconds = 0.5f;
 
         public DemoCatalog Catalog => m_Catalog;
-        // The demo running now, or null in the lobby.
+        // The active exclusive demo, or the most recently opened windowed app, or null in the lobby.
         public DemoCatalog.Entry Current => m_Current;
 
         // A demo (or the lobby, null) finished loading.
         public event System.Action<DemoCatalog.Entry> Loaded;
 
-        // Each demo's own log lines ([Video] and so on: its scene's name) go to the session log too,
-        // so a new demo's do without listing its tag anywhere.
+        public static bool IsWindowedApp(DemoCatalog.Entry entry) =>
+            entry != null && !string.IsNullOrEmpty(entry.Id) && s_WindowedIds.Contains(entry.Id);
+
+        public bool IsRunning(DemoCatalog.Entry entry)
+        {
+            if (entry == null)
+                return m_Current == null && m_OpenWindows.Count == 0;
+            if (entry == m_Current)
+                return true;
+            for (var i = 0; i < m_OpenWindows.Count; i++)
+            {
+                if (m_OpenWindows[i].entry == entry)
+                    return true;
+            }
+            return false;
+        }
+
         void Awake()
         {
             if (m_Catalog == null)
@@ -51,8 +72,6 @@ namespace CardboardXR.Demos
                 SessionLog.KeepTag(entry.LogTag);
         }
 
-        // A frame after Core's own Start, so the launch options for 6DoF and passthrough have applied
-        // before a demo overrides them.
         IEnumerator Start()
         {
             yield return null;
@@ -67,21 +86,19 @@ namespace CardboardXR.Demos
             if (m_Catalog.TryGet(index, out var entry))
             {
                 Debug.Log($"[Demos] Starting in demo {index} ({entry.Id}), from the launch option");
-                yield return Switch(entry);
+                yield return SwitchExclusive(entry);
             }
             else
             {
                 if (index >= 0)
                     Debug.LogWarning($"[Demos] No demo {index}: the catalog has {m_Catalog.Demos.Count}");
-                // The lobby starts in 6DoF passthrough, where LobbyFlow scans the room, unless the "dof 3"
-                // launch option asks for 3DoF.
                 if (LaunchOptions.GetInt("dof", 6) == 6)
                 {
                     var state = CoreState.Resolve(m_Core.State, m_Catalog.LobbyRequirements);
                     Debug.Log($"[Demos] Starting the lobby in {state}");
                     m_Core.Apply(state);
                 }
-                yield return Switch(null);
+                yield return SwitchExclusive(null);
             }
         }
 
@@ -93,80 +110,323 @@ namespace CardboardXR.Demos
 
         public void Enter(DemoCatalog.Entry entry)
         {
-            if (m_Busy || entry == m_Current)
+            if (m_Busy || entry == null)
                 return;
-            StartCoroutine(Switch(entry));
+            if (IsWindowedApp(entry))
+            {
+                if (TryRefocusWindowed(entry))
+                    return;
+                StartCoroutine(OpenWindowed(entry));
+                return;
+            }
+            if (entry == m_Current && m_OpenWindows.Count == 0)
+            {
+                RefocusLoadedScene();
+                return;
+            }
+            StartCoroutine(SwitchExclusive(entry));
         }
 
-        // The app library's Lobby, and a demo's own way out.
+        void RefocusLoadedScene()
+        {
+            if (string.IsNullOrEmpty(m_LoadedScene))
+                return;
+            var scene = SceneManager.GetSceneByPath(m_LoadedScene);
+            if (!scene.isLoaded)
+                return;
+            foreach (var root in scene.GetRootGameObjects())
+            {
+                foreach (var demo in root.GetComponentsInChildren<Demo>(true))
+                    demo.OnDemoRefocus(m_Core);
+            }
+        }
+
+        // Closes a single concurrent windowed app by id, leaving all other open apps running.
+        public void CloseApp(string id)
+        {
+            if (m_Busy || string.IsNullOrEmpty(id))
+                return;
+            for (var i = 0; i < m_OpenWindows.Count; i++)
+            {
+                if (m_OpenWindows[i].entry.Id == id)
+                {
+                    StartCoroutine(CloseWindowedAt(i));
+                    return;
+                }
+            }
+            if (m_Current != null && m_Current.Id == id)
+                ExitToLobby();
+        }
+
+        // Closes all open apps and returns cleanly to the Lobby.
         public void ExitToLobby()
         {
-            if (m_Busy || m_Current == null)
+            if (m_Busy || (m_Current == null && m_OpenWindows.Count == 0))
                 return;
-            StartCoroutine(Switch(null));
+            StartCoroutine(SwitchExclusive(null));
         }
 
-        // Unloads what's loaded and loads the demo, or the lobby for null.
-        IEnumerator Switch(DemoCatalog.Entry next)
+        bool TryRefocusWindowed(DemoCatalog.Entry entry)
+        {
+            for (var i = 0; i < m_OpenWindows.Count; i++)
+            {
+                if (m_OpenWindows[i].entry != entry)
+                    continue;
+                var scene = SceneManager.GetSceneByPath(m_OpenWindows[i].scenePath);
+                foreach (var demo in Demos(scene))
+                    demo.OnDemoRefocus(m_Core);
+                m_Current = entry;
+                Debug.Log($"[Demos] Refocused already-open windowed app {entry.Title}");
+                return true;
+            }
+            return false;
+        }
+
+        // Opens a windowed app additively alongside any other already-open windowed apps with NO black fade.
+        IEnumerator OpenWindowed(DemoCatalog.Entry next)
         {
             m_Busy = true;
             var started = Time.realtimeSinceStartup;
-            // The first scene comes up out of black; any later one fades the last out first.
-            if (m_Fade != null)
+            try
             {
-                StopFade();
-                if (m_LoadedScene == null)
-                    m_Fade.Alpha = 1f;
-                else
-                    yield return m_Fade.FadeTo(1f, k_FadeOutSeconds);
-            }
-            var fromDemo = m_Current != null;
-            yield return Unload(restore: next == null);
+                if (m_Core.Settings != null)
+                    m_Core.Settings.Close();
 
-            if (next != null)
-            {
-                // From the lobby, what to put back on leaving; from another demo, that's kept.
-                if (!fromDemo)
+                // If an exclusive full-room demo is open, unload it cleanly first and restore Lobby underneath.
+                if (m_Current != null && !IsWindowedApp(m_Current))
+                {
+                    if (m_Fade != null)
+                    {
+                        StopFade();
+                        yield return m_Fade.FadeTo(1f, k_FadeOutSeconds);
+                    }
+                    yield return UnloadExclusive(restore: true);
+                    yield return LoadLobbyBase();
+                    if (m_Fade != null)
+                        m_Fading = StartCoroutine(FadeIn());
+                }
+
+                // Ensure core meets the app's requirements without turning off what another open app needs.
+                if (m_OpenWindows.Count == 0)
                     m_BeforeDemo = m_Core.State;
-                var state = CoreState.Resolve(m_BeforeDemo, next.Requirements);
-                Debug.Log($"[Demos] Entering {next.Id}: {state} (was {m_BeforeDemo})");
-                // Anything a demo kept on leaving doesn't carry into the next one.
-                m_Core.Placer.RemoveAll();
-                // Cubes, unless the demo chooses something else in OnDemoEnter.
-                m_Core.Placer.ObjectPrefab = m_DefaultPrefab;
-                m_Core.Apply(state);
-                // Unless the lobby's scan already covered the room.
-                if (next.Requirements.ScanSurfaces && state.SixDof && !m_Core.Boundary.HasScannedRoom)
-                    m_Core.Boundary.ScanRoom();
-            }
+                var resolved = CoreState.Resolve(m_Core.State, next.Requirements);
+                var combined = new CoreState(
+                    m_Core.State.SixDof || resolved.SixDof,
+                    m_Core.State.Passthrough || resolved.Passthrough,
+                    m_Core.State.Hands || resolved.Hands);
+                if (!combined.Equals(m_Core.State))
+                    m_Core.Apply(combined);
 
-            var path = next != null ? next.ScenePath : m_Catalog.LobbyScenePath;
-            var loading = SceneManager.LoadSceneAsync(path, LoadSceneMode.Additive);
-            if (loading == null)
+                var loading = SceneManager.LoadSceneAsync(next.ScenePath, LoadSceneMode.Additive);
+                if (loading == null)
+                {
+                    Debug.LogError($"[Demos] Couldn't load {next.ScenePath}: is it in the build?");
+                    yield break;
+                }
+                yield return loading;
+
+                var scene = SceneManager.GetSceneByPath(next.ScenePath);
+                SceneManager.SetActiveScene(scene);
+                m_OpenWindows.Add((next, next.ScenePath));
+                m_Current = next;
+                if (m_Core.Boundary != null)
+                    m_Core.Boundary.ShowScanButton = false;
+                if (m_Core.Passthrough != null)
+                    VirtualEnvironment.SetAllHidden(m_Core.Passthrough.IsOn || EnvironmentManager.IsIsolated);
+                foreach (var demo in Demos(scene))
+                {
+                    try
+                    {
+                        demo.OnDemoEnter(m_Core);
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.LogException(e);
+                    }
+                }
+
+                Debug.Log($"[Demos] Opened windowed app {next.Title} ({m_OpenWindows.Count} open concurrently) in {Time.realtimeSinceStartup - started:F1} s");
+            }
+            finally
             {
-                Debug.LogError($"[Demos] Couldn't load {path}: is it in the build?");
                 m_Busy = false;
-                if (m_Fade != null)
-                    m_Fade.Alpha = 0f;
-                yield break;
             }
-            yield return loading;
+            Loaded?.Invoke(next);
+        }
 
-            var scene = SceneManager.GetSceneByPath(path);
-            // What the demo creates goes into its own scene, so unloading it cleans up.
-            SceneManager.SetActiveScene(scene);
-            m_LoadedScene = path;
-            m_Current = next;
-            foreach (var demo in Demos(scene))
-                demo.OnDemoEnter(m_Core);
-            Debug.Log($"[Demos] {(next != null ? next.Title : "Lobby")} loaded in {Time.realtimeSinceStartup - started:F1} s");
-            m_Busy = false;
+        IEnumerator CloseWindowedAt(int index)
+        {
+            m_Busy = true;
+            DemoCatalog.Entry entry = null;
+            try
+            {
+                if (index < 0 || index >= m_OpenWindows.Count)
+                    yield break;
+                var (item, path) = m_OpenWindows[index];
+                entry = item;
+                m_OpenWindows.RemoveAt(index);
+
+                var scene = SceneManager.GetSceneByPath(path);
+                foreach (var demo in Demos(scene))
+                {
+                    try
+                    {
+                        demo.OnDemoExit(m_Core);
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.LogException(e);
+                    }
+                }
+
+                if (m_OpenWindows.Count > 0)
+                {
+                    m_Current = m_OpenWindows[m_OpenWindows.Count - 1].entry;
+                    var prevScene = SceneManager.GetSceneByPath(m_OpenWindows[m_OpenWindows.Count - 1].scenePath);
+                    if (prevScene.IsValid() && prevScene.isLoaded)
+                        SceneManager.SetActiveScene(prevScene);
+                }
+                else
+                {
+                    m_Current = null;
+                    if (!string.IsNullOrEmpty(m_LoadedScene))
+                    {
+                        var lobbyScene = SceneManager.GetSceneByPath(m_LoadedScene);
+                        if (lobbyScene.IsValid() && lobbyScene.isLoaded)
+                            SceneManager.SetActiveScene(lobbyScene);
+                    }
+                    else
+                    {
+                        SceneManager.SetActiveScene(gameObject.scene);
+                    }
+                }
+
+                if (scene.IsValid() && scene.isLoaded)
+                    yield return SceneManager.UnloadSceneAsync(scene);
+
+                Debug.Log($"[Demos] Closed windowed app {entry.Title} ({m_OpenWindows.Count} remaining)");
+            }
+            finally
+            {
+                m_Busy = false;
+            }
+            Loaded?.Invoke(m_Current);
+        }
+
+        IEnumerator LoadLobbyBase()
+        {
+            if (m_LoadedScene == m_Catalog.LobbyScenePath)
+                yield break;
+            var loading = SceneManager.LoadSceneAsync(m_Catalog.LobbyScenePath, LoadSceneMode.Additive);
+            if (loading == null)
+                yield break;
+            yield return loading;
+            m_LoadedScene = m_Catalog.LobbyScenePath;
+            var scene = SceneManager.GetSceneByPath(m_LoadedScene);
+            if (scene.IsValid() && scene.isLoaded)
+                SceneManager.SetActiveScene(scene);
+        }
+
+        // Unloads all open scenes and loads an exclusive demo, or the lobby for null.
+        IEnumerator SwitchExclusive(DemoCatalog.Entry next)
+        {
+            m_Busy = true;
+            var started = Time.realtimeSinceStartup;
+            try
+            {
+                if (m_Fade != null)
+                {
+                    StopFade();
+                    if (m_LoadedScene == null)
+                        m_Fade.Alpha = 1f;
+                    else
+                        yield return m_Fade.FadeTo(1f, k_FadeOutSeconds);
+                }
+                var fromDemo = m_Current != null || m_OpenWindows.Count > 0;
+                yield return UnloadAllWindowed();
+                yield return UnloadExclusive(restore: next == null);
+
+                if (next != null)
+                {
+                    if (!fromDemo)
+                        m_BeforeDemo = m_Core.State;
+                    var state = CoreState.Resolve(m_BeforeDemo, next.Requirements);
+                    Debug.Log($"[Demos] Entering {next.Id}: {state} (was {m_BeforeDemo})");
+                    m_Core.Placer.RemoveAll();
+                    m_Core.Placer.ObjectPrefab = m_DefaultPrefab;
+                    m_Core.Placer.SurfaceFilter = PlacementSurfaceFilter.HorizontalAny;
+                    PinchRouter.SceneWantsHandPinch = next.Requirements.HandPinch;
+                    m_Core.Apply(state, forceArCoreSixDof: next.Requirements.ScanSurfaces);
+                }
+
+                var path = next != null ? next.ScenePath : m_Catalog.LobbyScenePath;
+                var loading = SceneManager.LoadSceneAsync(path, LoadSceneMode.Additive);
+                if (loading == null)
+                {
+                    Debug.LogError($"[Demos] Couldn't load {path}: is it in the build?");
+                    if (m_Fade != null)
+                        m_Fade.Alpha = 0f;
+                    yield break;
+                }
+                yield return loading;
+
+                var scene = SceneManager.GetSceneByPath(path);
+                SceneManager.SetActiveScene(scene);
+                m_LoadedScene = path;
+                m_Current = next;
+                if (m_Core.Boundary != null)
+                    m_Core.Boundary.ShowScanButton = next != null && next.Requirements.ScanSurfaces;
+                PinchRouter.SceneWantsHandPinch = next != null && next.Requirements.HandPinch;
+                if (m_Core.Passthrough != null && EnvironmentManager.IsIsolated)
+                    VirtualEnvironment.SetAllHidden(true);
+                foreach (var demo in Demos(scene))
+                {
+                    try
+                    {
+                        demo.OnDemoEnter(m_Core);
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.LogException(e);
+                    }
+                }
+                Debug.Log($"[Demos] {(next != null ? next.Title : "Lobby")} loaded in {Time.realtimeSinceStartup - started:F1} s");
+            }
+            finally
+            {
+                m_Busy = false;
+            }
             Loaded?.Invoke(next);
             if (m_Fade != null)
                 m_Fading = StartCoroutine(FadeIn());
         }
 
-        // A couple of frames late, so the scene and any mode change it made have drawn.
+        IEnumerator UnloadAllWindowed()
+        {
+            if (m_OpenWindows.Count == 0)
+                yield break;
+            for (var i = m_OpenWindows.Count - 1; i >= 0; i--)
+            {
+                var (_, path) = m_OpenWindows[i];
+                var scene = SceneManager.GetSceneByPath(path);
+                foreach (var demo in Demos(scene))
+                {
+                    try
+                    {
+                        demo.OnDemoExit(m_Core);
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.LogException(e);
+                    }
+                }
+                if (scene.IsValid() && scene.isLoaded)
+                    yield return SceneManager.UnloadSceneAsync(scene);
+            }
+            m_OpenWindows.Clear();
+            m_Current = null;
+        }
+
         IEnumerator FadeIn()
         {
             yield return null;
@@ -182,10 +442,8 @@ namespace CardboardXR.Demos
             m_Fading = null;
         }
 
-        // restore: put back what was on before the demo being left; not when another demo follows.
-        IEnumerator Unload(bool restore)
+        IEnumerator UnloadExclusive(bool restore)
         {
-            // The settings panel was opened for the scene being left.
             if (m_Core.Settings != null)
                 m_Core.Settings.Close();
             if (m_LoadedScene == null)
@@ -203,9 +461,11 @@ namespace CardboardXR.Demos
                 if (!leaving.Requirements.KeepPlacedObjects)
                     m_Core.Placer.RemoveAll();
                 m_Core.Placer.ObjectPrefab = null;
+                m_Core.Placer.SurfaceFilter = PlacementSurfaceFilter.HorizontalAny;
                 PinchRouter.Clear();
                 if (restore)
                 {
+                    PinchRouter.SceneWantsHandPinch = false;
                     Debug.Log($"[Demos] Leaving {leaving.Id}: back to {m_BeforeDemo}");
                     m_Core.Apply(m_BeforeDemo);
                 }
@@ -216,8 +476,8 @@ namespace CardboardXR.Demos
             }
 
             SceneManager.SetActiveScene(gameObject.scene);
-            yield return SceneManager.UnloadSceneAsync(scene);
-            // Demo assets, such as a video's textures, are only unloaded once nothing refers to them.
+            if (scene.IsValid() && scene.isLoaded)
+                yield return SceneManager.UnloadSceneAsync(scene);
             yield return Resources.UnloadUnusedAssets();
         }
 
@@ -225,7 +485,7 @@ namespace CardboardXR.Demos
         {
             if (!scene.IsValid() || !scene.isLoaded)
                 return System.Array.Empty<Demo>();
-            var found = new System.Collections.Generic.List<Demo>();
+            var found = new List<Demo>();
             foreach (var root in scene.GetRootGameObjects())
                 found.AddRange(root.GetComponentsInChildren<Demo>());
             return found.ToArray();

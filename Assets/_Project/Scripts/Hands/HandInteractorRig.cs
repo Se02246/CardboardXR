@@ -131,9 +131,15 @@ namespace CardboardXR.Hands
 
             // PinchRouter decides what the pinch does. Grabbing is the interactor's own: XRI reads it from
             // this as its select, just after this runs.
+            if (m_Gaze != null)
+            {
+                var dir = m_Tracker.PinchPoint - m_Gaze.transform.position;
+                if (dir.sqrMagnitude > 1e-6f)
+                    VisualPinchScroller.SyncPinchRay(new Ray(m_Gaze.transform.position, dir.normalized));
+            }
             var route = PinchRouter.Begin(PinchSource.Hand, m_Gaze, FindGrabbable() != null);
             m_Grabbing = route == PinchRoute.Grab;
-            m_Claimed = route == PinchRoute.Demo;
+            m_Claimed = route == PinchRoute.Demo || route == PinchRoute.Scroll;
         }
 
         void EndPinch()

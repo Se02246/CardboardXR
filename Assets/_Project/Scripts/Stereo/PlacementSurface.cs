@@ -44,6 +44,9 @@ namespace CardboardXR.Stereo
 
         void Update()
         {
+            if (SpatialSurfaceLocator.Active != null && SpatialSurfaceLocator.Active.IsPlacementActive)
+                m_Highlighted = false;
+
             // Hidden (too small yet, or merged), it eases in again when it's next shown.
             if (!m_Renderer.enabled)
             {

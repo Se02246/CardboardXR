@@ -21,7 +21,7 @@ namespace ProjectBootstrap
             Tagline = "A doorway on your floor into another world",
             Icon = "door_front",
             Tint = new Color(0.23f, 0.25f, 0.6f),
-            Requirements = new DemoRequirements { SixDof = Need.On, Passthrough = Need.On, Hands = Need.On },
+            Requirements = new DemoRequirements { SixDof = Need.On, Passthrough = Need.On, Hands = Need.On, ScanSurfaces = true },
         };
 
         public override void BuildScene(string folder)

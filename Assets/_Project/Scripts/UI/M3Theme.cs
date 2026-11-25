@@ -27,41 +27,45 @@ namespace CardboardXR.UI
 
         public static float DpToMeters(float dp, float distance) => dp * k_DpToDmm * 1e-3f * distance * CardboardScale;
 
-        // Baseline dark scheme.
-        public static readonly Color Primary = Hex(0xD0BCFF);
-        public static readonly Color OnPrimary = Hex(0x381E72);
-        public static readonly Color PrimaryContainer = Hex(0x4F378B);
-        public static readonly Color OnPrimaryContainer = Hex(0xEADDFF);
-        public static readonly Color SecondaryContainer = Hex(0x4A4458);
-        public static readonly Color OnSecondaryContainer = Hex(0xE8DEF8);
-        public static readonly Color Surface = Hex(0x141218);
-        public static readonly Color SurfaceContainer = Hex(0x211F26);
-        public static readonly Color SurfaceContainerHigh = Hex(0x2B2930);
-        public static readonly Color SurfaceContainerHighest = Hex(0x36343B);
-        public static readonly Color OnSurface = Hex(0xE6E0E9);
-        public static readonly Color OnSurfaceVariant = Hex(0xCAC4D0);
-        public static readonly Color Outline = Hex(0x938F99);
-        public static readonly Color OutlineVariant = Hex(0x49454F);
-        public static readonly Color Error = Hex(0xF2B8B5);
-        public static readonly Color InverseSurface = Hex(0xE6E0E9);
-        public static readonly Color InverseOnSurface = Hex(0x322F35);
+        // Apple Vision Pro (visionOS) translucent smoked-glass palette (analytical SDF shader, zero 9-slice seams).
+        public static readonly Color Primary = Hex(0xF2F7FF, 0.94f);
+        public static readonly Color OnPrimary = Hex(0x0A101D);
+        public static readonly Color PrimaryContainer = Hex(0x1D3B63, 0.62f);
+        public static readonly Color OnPrimaryContainer = Hex(0xE8F4FF);
+        public static readonly Color SecondaryContainer = Hex(0x30394D, 0.54f);
+        public static readonly Color OnSecondaryContainer = Hex(0xFFFFFF);
+        public static readonly Color Surface = Hex(0x0A0D14);
+        public static readonly Color SurfaceContainer = Hex(0x1E2330, 0.58f);
+        public static readonly Color SurfaceContainerHigh = Hex(0x282F40, 0.70f);
+        public static readonly Color SurfaceContainerHighest = Hex(0x363F54, 0.62f);
+        public static readonly Color OnSurface = Hex(0xFFFFFF);
+        public static readonly Color OnSurfaceVariant = Hex(0xC6D0E0);
+        public static readonly Color Outline = Hex(0xFFFFFF, 0.34f);
+        public static readonly Color OutlineVariant = Hex(0xFFFFFF, 0.16f);
+        public static readonly Color Error = Hex(0xFF6961);
+        public static readonly Color InverseSurface = Hex(0xF5F8FC, 0.96f);
+        public static readonly Color InverseOnSurface = Hex(0x0C111C);
 
-        // State layers: the content color at these opacities over the container. Twice Material's 8% and
-        // 10%: through a phone in a viewer, at about half a headset's pixels per degree, those were
-        // too faint to tell hovered from not.
-        public const float k_HoverOpacity = 0.16f;
-        public const float k_PressedOpacity = 0.2f;
+        // Additional visionOS glass semantic tokens.
+        public static readonly Color GlassRecessed = Hex(0x0F131D, 0.44f);
+        public static readonly Color GlassAccent = Hex(0x5AC8FA, 0.95f);
+        public static readonly Color StarGold = Hex(0xFFD60A, 0.96f);
+        public static readonly Color GlassRestingBar = Hex(0xFFFFFF, 0.58f);
+
+        // State layers: luminous visionOS specular hover lift over translucent glass.
+        public const float k_HoverOpacity = 0.22f;
+        public const float k_PressedOpacity = 0.32f;
         // Disabled: content at 38%, container at 12% of on-surface.
         public const float k_DisabledContent = 0.38f;
         public const float k_DisabledContainer = 0.12f;
 
-        // Corner radii, in dp. Full rounds a shape's shorter side.
+        // Corner radii, in dp. Full rounds a shape's shorter side into a circle or capsule.
         public const float k_ShapeFull = 1000f;
-        public const float k_ShapePanel = 32f;
-        public const float k_ShapeDialog = 28f;
-        public const float k_ShapeLarge = 16f;
-        public const float k_ShapeCard = 12f;
-        public const float k_ShapeSmall = 8f;
+        public const float k_ShapePanel = 42f;
+        public const float k_ShapeDialog = 30f;
+        public const float k_ShapeLarge = 24f;
+        public const float k_ShapeCard = 20f;
+        public const float k_ShapeSmall = 16f;
 
         // Spatial elevation, in dp toward the viewer.
         public const float k_ElevationOrbiter = 16f;
@@ -109,6 +113,34 @@ namespace CardboardXR.UI
 
         public static Color WithAlpha(Color color, float alpha) => new(color.r, color.g, color.b, alpha);
 
-        static Color Hex(int rgb) => new(((rgb >> 16) & 0xFF) / 255f, ((rgb >> 8) & 0xFF) / 255f, (rgb & 0xFF) / 255f, 1f);
+        // Apple visionOS-style anchored window orientation: strictly level (0 deg roll, upright relative to
+        // gravity), facing the viewer horizontally with a gentle ergonomic tilt toward the eyes.
+        public static Quaternion FacingRotation(Vector3 panelPosition, Vector3 headPosition, float maxTiltDeg = 14f)
+        {
+            var offset = panelPosition - headPosition;
+            var dist = offset.magnitude;
+            if (dist < 1e-4f)
+                return Quaternion.identity;
+            var yaw = Mathf.Atan2(offset.x, offset.z) * Mathf.Rad2Deg;
+            var elevDeg = Mathf.Asin(Mathf.Clamp(offset.y / dist, -0.95f, 0.95f)) * Mathf.Rad2Deg;
+            var pitch = -Mathf.Clamp(elevDeg * 0.45f, -maxTiltDeg, maxTiltDeg);
+            return Quaternion.Euler(pitch, yaw, 0f);
+        }
+
+        // Full spherical facing for floating follow-me windows: tangent to a sphere around the viewer's
+        // eyes (0 deg roll) so windows placed high look down at you and windows placed low look up at you.
+        public static Quaternion SphericalFacingRotation(Vector3 panelPosition, Vector3 headPosition)
+        {
+            var offset = panelPosition - headPosition;
+            var dist = offset.magnitude;
+            if (dist < 1e-4f)
+                return Quaternion.identity;
+            var yaw = Mathf.Atan2(offset.x, offset.z) * Mathf.Rad2Deg;
+            var elevDeg = Mathf.Asin(Mathf.Clamp(offset.y / dist, -0.96f, 0.96f)) * Mathf.Rad2Deg;
+            return Quaternion.Euler(-elevDeg, yaw, 0f);
+        }
+
+        static Color Hex(int rgb, float alpha = 1f) =>
+            new(((rgb >> 16) & 0xFF) / 255f, ((rgb >> 8) & 0xFF) / 255f, (rgb & 0xFF) / 255f, alpha);
     }
 }

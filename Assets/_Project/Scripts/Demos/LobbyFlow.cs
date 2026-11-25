@@ -25,6 +25,7 @@ namespace CardboardXR.Demos
 
         [SerializeField] CoreServices m_Core;
         [SerializeField] AppLibrary m_Library;
+        [SerializeField] ShizukuOnboardingController m_ShizukuOnboarding;
 
         bool m_Scanned;
         bool m_Ending;
@@ -47,16 +48,26 @@ namespace CardboardXR.Demos
         {
             if (entry != null)
             {
-                // Left mid-scan, from the library: nothing more to show.
                 StopAllCoroutines();
                 if (m_Panel != null)
                     M3Fade.Hide(m_Panel.gameObject);
+                if (m_ShizukuOnboarding != null)
+                    m_ShizukuOnboarding.Hide(invokeDismiss: false);
                 return;
             }
-            if (!m_Scanned && m_Core.Fusion.CurrentMode == HeadPoseFusion.Mode.SixDof)
-                StartCoroutine(ScanThenOpen());
-            else
-                m_Library.Open();
+            // No blocking "Scanning your room" popup: ARCore already tracks & detects the floor
+            // silently in the background. On first launch, prompt to configure Shizuku before opening App Library.
+            m_Scanned = true;
+            if (m_ShizukuOnboarding != null && m_ShizukuOnboarding.ShouldShowOnStartup)
+            {
+                m_ShizukuOnboarding.StartOnboarding(() =>
+                {
+                    if (m_Core == null || m_Core.Demos == null || m_Core.Demos.Current == null)
+                        m_Library.Open();
+                });
+                return;
+            }
+            m_Library.Open();
         }
 
         IEnumerator ScanThenOpen()

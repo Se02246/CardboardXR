@@ -1,3 +1,4 @@
+using CardboardXR.UI;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.XR.Interaction.Toolkit.Interactors;
@@ -39,6 +40,7 @@ namespace CardboardXR.Hands
             m_Cursor.sharedMaterial = new Material(m_Material) { renderQueue = k_RenderQueue };
             m_Cursor.shadowCastingMode = ShadowCastingMode.Off;
             m_Cursor.receiveShadows = false;
+            m_Cursor.sortingOrder = UiRenderQueue.k_HandRaySortingOrder;
             m_Block = new MaterialPropertyBlock();
         }
 

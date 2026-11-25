@@ -18,12 +18,20 @@ namespace CardboardXR.Demos
             m_Prompt = prompt;
         }
 
-        public void OnPointerEnter(PointerEventData eventData) => m_Target.text = m_Tagline;
+        public void OnPointerEnter(PointerEventData eventData)
+        {
+            if (m_Target == null)
+                return;
+            m_Target.text = AppLibrary.IsReorderModeGlobal ? AppLibrary.ReorderPrompt : m_Tagline;
+        }
 
         public void OnPointerExit(PointerEventData eventData)
         {
-            if (m_Target.text == m_Tagline)
-                m_Target.text = m_Prompt;
+            if (m_Target == null)
+                return;
+            var fallback = AppLibrary.IsReorderModeGlobal ? AppLibrary.ReorderPrompt : m_Prompt;
+            if (m_Target.text == m_Tagline || m_Target.text == AppLibrary.ReorderPrompt)
+                m_Target.text = fallback;
         }
     }
 }

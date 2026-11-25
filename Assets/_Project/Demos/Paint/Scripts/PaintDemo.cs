@@ -308,6 +308,18 @@ namespace CardboardXR.Demos.Paint
         }
 
 
+        public override void OnDemoRefocus(CoreServices core)
+        {
+            if (core != null)
+                m_Core = core;
+            if (m_Panel == null || m_Core == null || m_Core.Head == null)
+                return;
+            if (CardboardXR.Stereo.SpatialWindowAnchor.IsStowed(m_Panel))
+                CardboardXR.Stereo.SpatialWindowAnchor.SetFloatingStowed(false);
+            CardboardXR.UI.M3Fade.Show(m_Panel.gameObject);
+            PlacePanel();
+        }
+
         // To the left of where the head faces, a little below the eyes, turned to face it.
         void PlacePanel()
         {

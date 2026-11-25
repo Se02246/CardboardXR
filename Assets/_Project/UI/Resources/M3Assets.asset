@@ -16,3 +16,5 @@ MonoBehaviour:
   m_Medium: {fileID: 11400000, guid: 0fcae934ed12a4de1932911e8c835f67, type: 2}
   m_Icons: {fileID: 11400000, guid: d3642f145e42a4881befcda110994e0a, type: 2}
   m_Round: {fileID: 886868565495289997, guid: 2d367591598f34de99ae331717036c2e, type: 2}
+  m_GlassMaterial: {fileID: 2100000, guid: efcb5cdb3e6c4af46858c5fa9fce01fb, type: 2}
+  m_RoundedScreenMaterial: {fileID: 2100000, guid: 1351f6b067080894ca2bbce3159283a0, type: 2}

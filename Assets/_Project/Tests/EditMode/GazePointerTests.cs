@@ -201,6 +201,52 @@ namespace CardboardXR.Stereo.Tests
             return cube;
         }
 
+        [Test]
+        public void Reticle_StaysSingleDotAndTurnsCyanWhenInteractive()
+        {
+            var idle = new Color(1f, 1f, 1f, 0.9f);
+            var cyan = new Color(0f, 0.92f, 1f, 0.98f);
+            var grab = new Color(1f, 0.72f, 0.22f, 0.98f);
+
+            var resolvedIdle = GazeReticle.ResolveDotColor(false, 0f, idle, cyan, grab);
+            Assert.AreEqual(idle.r, resolvedIdle.r, 1e-4f);
+            Assert.AreEqual(idle.g, resolvedIdle.g, 1e-4f);
+            Assert.AreEqual(idle.b, resolvedIdle.b, 1e-4f);
+
+            var resolvedInteractive = GazeReticle.ResolveDotColor(false, 1f, idle, cyan, grab);
+            Assert.Less(resolvedInteractive.r, 0.1f);
+            Assert.Greater(resolvedInteractive.g, 0.85f);
+            Assert.Greater(resolvedInteractive.b, 0.95f);
+
+            var resolvedGrab = GazeReticle.ResolveDotColor(true, 1f, idle, cyan, grab);
+            Assert.AreEqual(grab.r, resolvedGrab.r, 1e-4f);
+            Assert.AreEqual(grab.g, resolvedGrab.g, 1e-4f);
+            Assert.AreEqual(grab.b, resolvedGrab.b, 1e-4f);
+
+            var shader = Shader.Find("CardboardXR/Reticle");
+            if (shader == null)
+                return;
+
+            var mat = new Material(shader);
+            var go = Track(new GameObject("Test Dot Reticle", typeof(MeshFilter), typeof(MeshRenderer)));
+            try
+            {
+                var renderer = go.GetComponent<MeshRenderer>();
+                renderer.sharedMaterial = mat;
+                var reticle = go.AddComponent<GazeReticle>();
+                var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                typeof(GazeReticle).GetMethod("Awake", flags)?.Invoke(reticle, null);
+                reticle.SetTarget(1.5f, interactive: true);
+                typeof(GazeReticle).GetMethod("LateUpdate", flags)?.Invoke(reticle, null);
+
+                Assert.AreEqual(0f, mat.GetFloat("_Inner"), 1e-5f);
+            }
+            finally
+            {
+                Object.DestroyImmediate(mat);
+            }
+        }
+
         static void MoveTo(GameObject target, Vector3 position)
         {
             target.transform.position = position;

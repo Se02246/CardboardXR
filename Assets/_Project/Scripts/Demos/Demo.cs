@@ -10,6 +10,8 @@ namespace CardboardXR.Demos
     {
         public virtual void OnDemoEnter(CoreServices core) { }
 
+        public virtual void OnDemoRefocus(CoreServices core) { }
+
         public virtual void OnDemoExit(CoreServices core) { }
     }
 }

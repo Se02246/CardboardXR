@@ -13,7 +13,7 @@ namespace CardboardXR.Stereo
     {
         // Core's tags, then each demo's (KeepTag). Replaced whole, never changed in place, since lines
         // arrive on any thread.
-        static volatile string[] s_Tags = { "[Pose]", "[AR]", "[Room]", "[Anchor]", "[Hands]", "[Pinch]", "[Perf]", "[Passthrough]", "[Tracking]", "[Gaze]", "[Hitch]", "[Frames]", "[Stereo]", "[Viewer]", "[Demos]", "[Settings]", "[Light]", "[Thermal]" };
+        static volatile string[] s_Tags = { "[Pose]", "[AR]", "[Room]", "[Anchor]", "[Hands]", "[Pinch]", "[Watch]", "[Perf]", "[Passthrough]", "[Tracking]", "[Gaze]", "[Hitch]", "[Frames]", "[Stereo]", "[Viewer]", "[Demos]", "[Settings]", "[Light]", "[Thermal]" };
         // Unity's own warnings when job scratch memory outlives four frames, which the hand models on
         // the CPU cause whenever a run takes longer than that (on a Pixel 9 Pro at 60 Hz, most runs):
         // the memory is freed late, not lost. Written every time, they buried the log, three lines per

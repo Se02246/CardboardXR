@@ -21,23 +21,29 @@ namespace CardboardXR.UI
         const float k_IconSize = 20f;
         const float k_IconGap = 8f;
 
-        // A world-space canvas whose units are dp at the distance, with an optional rounded surface.
+        // A world-space canvas whose units are dp at the distance, with an optional frosted glass surface.
         public static RectTransform Canvas(string name, Transform parent, Vector2 size, float distance,
-            Color? surface = null, float radius = M3Theme.k_ShapePanel)
+            Color? surface = null, float radius = M3Theme.k_ShapePanel, float scaleFactor = 1f,
+            VisionSurfaceStyle style = VisionSurfaceStyle.Frosted)
         {
             var canvasObject = new GameObject(name, typeof(RectTransform));
             canvasObject.transform.SetParent(parent, false);
-            canvasObject.AddComponent<Canvas>().renderMode = RenderMode.WorldSpace;
+            var canvas = canvasObject.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.WorldSpace;
+            canvas.additionalShaderChannels |= AdditionalCanvasShaderChannels.TexCoord1 | AdditionalCanvasShaderChannels.TexCoord2;
             var rect = (RectTransform)canvasObject.transform;
             rect.sizeDelta = size;
             canvasObject.AddComponent<M3Canvas>().SetDistance(distance);
-            // Fades in when shown and, hidden with M3Fade.Hide, out.
+            if (!Mathf.Approximately(scaleFactor, 1f))
+                rect.localScale *= scaleFactor;
+            // Fades in when shown and, hidden with M3Fade.Hide, out. Scale is set BEFORE M3Fade so OnEnable captures the true base scale.
             canvasObject.AddComponent<M3Fade>();
+            M3Fade.SyncBaseScale(canvasObject);
             if (surface.HasValue)
             {
                 var image = canvasObject.AddComponent<Image>();
                 image.color = surface.Value;
-                M3Shapes.Apply(image, radius);
+                ApplyGlass(image, radius, style);
             }
             return rect;
         }
@@ -60,9 +66,47 @@ namespace CardboardXR.UI
             return rect;
         }
 
-        // A rounded rectangle of a color: a card's or a panel's surface, a divider, an indicator.
+        // Configures a UI Image with the analytical visionOS frosted-glass shader & rounded SDF geometry.
+        public static VisionSurfaceEffect ApplyGlass(Image image, float radius, VisionSurfaceStyle style = VisionSurfaceStyle.Frosted,
+            float rimStrength = -1f, float sheenStrength = -1f)
+        {
+            if (image == null)
+                return null;
+            var (defaultRim, defaultSheen) = DefaultGlassFactors(style);
+            var rim = rimStrength >= 0f ? rimStrength : defaultRim;
+            var sheen = sheenStrength >= 0f ? sheenStrength : defaultSheen;
+            var mat = M3Assets.GetGlassMaterial();
+            if (mat != null)
+            {
+                image.material = mat;
+                image.sprite = null;
+                image.type = Image.Type.Simple;
+            }
+            else if (radius > 0f)
+            {
+                M3Shapes.Apply(image, radius);
+            }
+            var fx = image.GetComponent<VisionSurfaceEffect>();
+            if (fx == null)
+                fx = image.gameObject.AddComponent<VisionSurfaceEffect>();
+            fx.Configure(radius, style, rim, sheen);
+            return fx;
+        }
+
+        static (float rim, float sheen) DefaultGlassFactors(VisionSurfaceStyle style) => style switch
+        {
+            VisionSurfaceStyle.Recessed => (0.48f, 0.35f),
+            VisionSurfaceStyle.Glossy => (0.95f, 1.0f),
+            VisionSurfaceStyle.Pure => (0f, 0f),
+            VisionSurfaceStyle.OutlineRing => (1.5f, 0f),
+            VisionSurfaceStyle.CornerArc => (3.0f, 0.9f),
+            _ => (0.85f, 0.85f),
+        };
+
+        // A rounded rectangle of a visionOS glass surface, a card, a divider, or an indicator.
         public static Image Surface(string name, RectTransform parent, Vector2 position, Vector2 size, Color color, float radius,
-            bool raycastTarget = false)
+            bool raycastTarget = false, VisionSurfaceStyle style = VisionSurfaceStyle.Frosted,
+            float rimStrength = -1f, float sheenStrength = -1f)
         {
             var rect = NewRect(name, parent);
             rect.anchoredPosition = position;
@@ -70,9 +114,36 @@ namespace CardboardXR.UI
             var image = rect.gameObject.AddComponent<Image>();
             image.color = color;
             image.raycastTarget = raycastTarget;
-            if (radius > 0f)
-                M3Shapes.Apply(image, radius);
+            ApplyGlass(image, Mathf.Max(0f, radius), style, rimStrength, sheenStrength);
             return image;
+        }
+
+        // A full-bleed borderless rounded-corner media screen (RawImage + analytical SDF edge rim).
+        public static RawImage RoundedScreen(string name, RectTransform parent, Vector2 position, Vector2 size, float radius,
+            bool raycastTarget = true, float rimStrength = 0.55f, float sheenStrength = 0.18f)
+        {
+            var rect = NewRect(name, parent);
+            rect.anchoredPosition = position;
+            rect.sizeDelta = size;
+            var raw = rect.gameObject.AddComponent<RawImage>();
+            raw.color = Color.white;
+            raw.raycastTarget = raycastTarget;
+            var mat = M3Assets.GetRoundedScreenMaterial();
+            if (mat != null)
+                raw.material = mat;
+            var fx = rect.gameObject.AddComponent<VisionSurfaceEffect>();
+            fx.Configure(radius, VisionSurfaceStyle.Frosted, rimStrength, sheenStrength);
+            return raw;
+        }
+
+        // Crisp text with a soft dark drop-shadow child behind it for floating spatial labels over live passthrough.
+        public static TextMeshProUGUI TextWithShadow(string name, RectTransform parent, string content, M3Theme.Type type,
+            Vector2 position, Vector2 size, Color? color = null, TextAlignmentOptions alignment = TextAlignmentOptions.Center)
+        {
+            var shadow = Text($"{name} Shadow", parent, content, type, position + new Vector2(0f, -1.3f), size,
+                new Color(0f, 0f, 0f, 0.62f), alignment);
+            shadow.textWrappingMode = TextWrappingModes.NoWrap;
+            return Text(name, parent, content, type, position, size, color, alignment);
         }
 
         public static TextMeshProUGUI Text(string name, RectTransform parent, string content, M3Theme.Type type, Vector2 position,
@@ -150,6 +221,20 @@ namespace CardboardXR.UI
             return Finish(root, variant, button, container, outline, labelText, iconText, onClick, Color.white);
         }
 
+        // A compact pill key button for virtual keyboards and floating bar controls.
+        public static M3Button Key(string name, RectTransform parent, string label, M3Button.Variant variant, Vector2 position,
+            Vector2 size, UnityAction onClick)
+        {
+            var (root, button, container, outline) = ButtonBase(name, parent, position, size, M3Theme.k_ShapeFull,
+                variant == M3Button.Variant.Outlined);
+            var labelText = Text("Label", root, label, M3Theme.Type.TitleMedium, Vector2.zero,
+                new Vector2(size.x - 8f, size.y));
+            labelText.textWrappingMode = TextWrappingModes.NoWrap;
+            labelText.overflowMode = TextOverflowModes.Overflow;
+            return Finish(root, variant, button, container, outline, labelText, null, onClick, Color.white,
+                M3Theme.k_ShapeFull);
+        }
+
         // A round button holding only an icon, k_ButtonHeight across.
         public static M3Button IconButton(string name, RectTransform parent, string icon, M3Button.Variant variant, Vector2 position,
             UnityAction onClick, float size = M3Theme.k_Target)
@@ -162,9 +247,13 @@ namespace CardboardXR.UI
 
         // A navigation-bar item for an orbiter toolbar: an icon in a pill indicator, over a label.
         public static M3Button ToolbarItem(string name, RectTransform parent, string icon, string label, Vector2 position, float width,
-            UnityAction onClick)
+            UnityAction onClick, float height = 76f, float indicatorWidth = 64f, float indicatorHeight = 36f,
+            float iconSize = 24f, float labelFontSize = 0f)
         {
-            const float height = 76f;
+            var compact = height < 68f;
+            var iconY = compact ? 10f : 14f;
+            var labelY = compact ? -17f : -22f;
+            var labelH = compact ? 18f : 24f;
             var root = NewRect(name, parent);
             root.anchoredPosition = position;
             root.sizeDelta = new Vector2(width, height);
@@ -173,11 +262,14 @@ namespace CardboardXR.UI
             hit.color = Color.clear;
             var button = root.gameObject.AddComponent<UnityEngine.UI.Button>();
             button.transition = Selectable.Transition.None;
-            var indicator = Surface("Indicator", root, new Vector2(0f, 14f), new Vector2(64f, 36f), Color.clear, M3Theme.k_ShapeFull);
-            var stateImage = Surface("State Layer", indicator.rectTransform, Vector2.zero, new Vector2(64f, 36f), Color.clear,
-                M3Theme.k_ShapeFull);
-            var iconText = Icon("Icon", root, icon, 24f, new Vector2(0f, 14f), M3Theme.OnSurfaceVariant);
-            var labelText = Text("Label", root, label, M3Theme.Type.LabelLarge, new Vector2(0f, -22f), new Vector2(width, 24f));
+            var indicator = Surface("Indicator", root, new Vector2(0f, iconY), new Vector2(indicatorWidth, indicatorHeight), Color.clear,
+                M3Theme.k_ShapeFull, style: VisionSurfaceStyle.Glossy, rimStrength: 0.78f, sheenStrength: 0.90f);
+            var stateImage = Surface("State Layer", indicator.rectTransform, Vector2.zero, new Vector2(indicatorWidth, indicatorHeight), Color.clear,
+                M3Theme.k_ShapeFull, style: VisionSurfaceStyle.Pure);
+            var iconText = Icon("Icon", root, icon, iconSize, new Vector2(0f, iconY), M3Theme.OnSurfaceVariant);
+            var labelText = Text("Label", root, label, M3Theme.Type.LabelLarge, new Vector2(0f, labelY), new Vector2(width - 2f, labelH));
+            if (labelFontSize > 0f)
+                labelText.fontSize = labelFontSize;
             labelText.textWrappingMode = TextWrappingModes.NoWrap;
             labelText.overflowMode = TextOverflowModes.Overflow;
             var state = root.gameObject.AddComponent<M3StateLayer>();
@@ -215,10 +307,10 @@ namespace CardboardXR.UI
         public static (M3Button item, TMP_Text supporting) ListItem(string name, RectTransform parent, string icon, Vector2 position,
             float width, UnityAction onClick)
         {
-            const float padding = 16f;
+            const float padding = 20f;
             const float iconSize = 24f;
             var size = new Vector2(width, k_ListItemHeight);
-            var (root, button, container, outline) = ButtonBase(name, parent, position, size, M3Theme.k_ShapeLarge, false);
+            var (root, button, container, outline) = ButtonBase(name, parent, position, size, M3Theme.k_ShapeFull, false);
             var iconText = Icon("Icon", root, icon, iconSize, new Vector2(-width / 2f + padding + iconSize / 2f, 0f), M3Theme.OnSurfaceVariant);
             var textLeft = padding + iconSize + padding;
             var textWidth = width - textLeft - padding;
@@ -230,7 +322,7 @@ namespace CardboardXR.UI
                 M3Theme.OnSurfaceVariant, TextAlignmentOptions.Left);
             supporting.textWrappingMode = TextWrappingModes.NoWrap;
             var m3 = Finish(root, M3Button.Variant.ListItem, button, container, outline, headline, iconText, onClick, Color.white,
-                M3Theme.k_ShapeLarge);
+                M3Theme.k_ShapeFull);
             return (m3, supporting);
         }
 
@@ -243,24 +335,26 @@ namespace CardboardXR.UI
             return Finish(root, M3Button.Variant.Swatch, button, container, outline, null, check, onClick, color);
         }
 
-        // A slider as wide as given, its target k_ButtonHeight tall around a track.
+        // A slider as wide as given, its target k_ButtonHeight tall around a recessed glass track.
         public static M3Slider Slider(string name, RectTransform parent, Vector2 position, float width)
         {
-            const float trackHeight = 12f;
-            const float handle = 24f;
+            const float trackHeight = 10f;
+            const float handle = 22f;
             var root = NewRect(name, parent);
             root.anchoredPosition = position;
             root.sizeDelta = new Vector2(width, k_ButtonHeight);
             var hit = root.gameObject.AddComponent<Image>();
             hit.color = Color.clear;
-            var track = Surface("Track", root, Vector2.zero, new Vector2(width, trackHeight), M3Theme.SecondaryContainer, M3Theme.k_ShapeFull);
+            var track = Surface("Track", root, Vector2.zero, new Vector2(width, trackHeight), M3Theme.GlassRecessed,
+                M3Theme.k_ShapeFull, style: VisionSurfaceStyle.Recessed);
             var active = Surface("Active", track.rectTransform, Vector2.zero, new Vector2(trackHeight, trackHeight), M3Theme.Primary,
-                M3Theme.k_ShapeFull);
+                M3Theme.k_ShapeFull, style: VisionSurfaceStyle.Pure);
             var activeRect = active.rectTransform;
             activeRect.anchorMin = activeRect.anchorMax = new Vector2(0f, 0.5f);
             activeRect.pivot = new Vector2(0f, 0.5f);
             activeRect.anchoredPosition = Vector2.zero;
-            var knob = Surface("Handle", track.rectTransform, Vector2.zero, new Vector2(handle, handle), M3Theme.Primary, M3Theme.k_ShapeFull);
+            var knob = Surface("Handle", track.rectTransform, Vector2.zero, new Vector2(handle, handle), M3Theme.Primary,
+                M3Theme.k_ShapeFull, style: VisionSurfaceStyle.Glossy, rimStrength: 0.9f, sheenStrength: 1.0f);
             var slider = root.gameObject.AddComponent<M3Slider>();
             slider.Initialize(track.rectTransform, activeRect, knob.rectTransform, handle);
             return slider;
@@ -274,10 +368,13 @@ namespace CardboardXR.UI
             root.sizeDelta = size;
             Image outline = null;
             if (withOutline)
-                outline = Surface("Outline", root, Vector2.zero, size, Color.clear, radius);
+            {
+                outline = Surface("Outline", root, Vector2.zero, size, Color.clear, radius, raycastTarget: false,
+                    style: VisionSurfaceStyle.OutlineRing, rimStrength: ring <= 1.2f ? 1.5f : ring, sheenStrength: 0f);
+            }
             // The container takes the gaze's ray: the root's own image would be on top of nothing.
             var container = Surface("Container", root, Vector2.zero, withOutline ? size - Vector2.one * (2f * ring) : size, Color.clear,
-                radius, raycastTarget: true);
+                radius, raycastTarget: true, style: VisionSurfaceStyle.Frosted, rimStrength: 0.72f, sheenStrength: 0.75f);
             var button = root.gameObject.AddComponent<UnityEngine.UI.Button>();
             button.transition = Selectable.Transition.None;
             button.targetGraphic = container;
@@ -287,7 +384,13 @@ namespace CardboardXR.UI
         static M3Button Finish(RectTransform root, M3Button.Variant variant, Button button, Image container, Image outline, TMP_Text label,
             TMP_Text icon, UnityAction onClick, Color swatch, float radius = M3Theme.k_ShapeFull)
         {
-            var stateImage = Surface("State Layer", root, Vector2.zero, root.sizeDelta, Color.clear, radius);
+            if (variant == M3Button.Variant.Swatch && container != null &&
+                container.TryGetComponent<VisionSurfaceEffect>(out var fx))
+            {
+                fx.Configure(radius, VisionSurfaceStyle.Glossy, 0.90f, 1.0f);
+            }
+            var stateImage = Surface("State Layer", root, Vector2.zero, root.sizeDelta, Color.clear, radius,
+                raycastTarget: false, style: VisionSurfaceStyle.Pure);
             // Over the container, under the content.
             stateImage.transform.SetSiblingIndex(container.transform.GetSiblingIndex() + 1);
             var state = root.gameObject.AddComponent<M3StateLayer>();

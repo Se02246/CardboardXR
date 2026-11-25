@@ -12,6 +12,8 @@
         "CardboardXR.Tests.Support",
         "UnityEngine.UI",
         "Unity.XR.Hands",
+        "Unity.XR.ARFoundation",
+        "Unity.XR.ARSubsystems",
         "CardboardXR.UI",
         "Unity.TextMeshPro"
     ],

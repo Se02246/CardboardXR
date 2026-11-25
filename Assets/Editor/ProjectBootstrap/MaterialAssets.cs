@@ -19,6 +19,10 @@ namespace ProjectBootstrap
         const string ResourcesFolder = UiFolder + "/Resources";
         const string TmpSettingsPath = "Assets/TextMesh Pro/Resources/TMP Settings.asset";
         const string MobileSdfShader = "TextMeshPro/Mobile/Distance Field";
+        const string VisionGlassShaderPath = "Assets/_Project/Shaders/VisionGlass.shader";
+        const string RoundedScreenShaderPath = "Assets/_Project/Shaders/RoundedScreen.shader";
+        const string VisionGlassMatPath = UiFolder + "/Vision Glass.mat";
+        const string RoundedScreenMatPath = UiFolder + "/Rounded Screen.mat";
 
         public static void Ensure()
         {
@@ -29,6 +33,7 @@ namespace ProjectBootstrap
             if (assets != null && assets.Regular != null && assets.Medium != null && assets.Icons != null && assets.Round != null)
             {
                 AddMissingIcons(assets.Icons);
+                EnsureVisionMaterials(assets);
                 return;
             }
 
@@ -42,9 +47,47 @@ namespace ProjectBootstrap
                 AssetDatabase.CreateAsset(assets, path);
             }
             assets.Set(regular, medium, icons, round);
+            EnsureVisionMaterials(assets);
             EditorUtility.SetDirty(assets);
             AssetDatabase.SaveAssets();
-            Debug.Log("[MaterialAssets] Made the Material UI's fonts and shapes");
+            Debug.Log("[MaterialAssets] Made the Material UI's fonts, shapes, and visionOS glass materials");
+        }
+
+        static void EnsureVisionMaterials(M3Assets assets)
+        {
+            var glassMat = EnsureUiMaterial(VisionGlassMatPath, VisionGlassShaderPath, M3Assets.k_VisionGlassShader, "Vision Glass");
+            var screenMat = EnsureUiMaterial(RoundedScreenMatPath, RoundedScreenShaderPath, M3Assets.k_RoundedScreenShader, "Rounded Screen");
+            if (assets.GlassMaterial != glassMat || assets.RoundedScreenMaterial != screenMat)
+            {
+                assets.SetMaterials(glassMat, screenMat);
+                EditorUtility.SetDirty(assets);
+                AssetDatabase.SaveAssets();
+            }
+        }
+
+        static Material EnsureUiMaterial(string matPath, string shaderPath, string shaderName, string matName)
+        {
+            var shader = AssetDatabase.LoadAssetAtPath<Shader>(shaderPath) ?? Shader.Find(shaderName);
+            if (shader == null)
+            {
+                Debug.LogError($"[MaterialAssets] Missing shader {shaderPath} ({shaderName})");
+                return AssetDatabase.LoadAssetAtPath<Material>(matPath);
+            }
+            var existing = AssetDatabase.LoadAssetAtPath<Material>(matPath);
+            if (existing != null)
+            {
+                if (existing.shader != shader)
+                {
+                    existing.shader = shader;
+                    EditorUtility.SetDirty(existing);
+                    AssetDatabase.SaveAssets();
+                }
+                return existing;
+            }
+            var created = new Material(shader) { name = matName };
+            AssetDatabase.CreateAsset(created, matPath);
+            Debug.Log($"[MaterialAssets] Created {matPath}");
+            return created;
         }
 
         // TMP's shaders and settings come in a unitypackage inside the ugui package. It's unpacked here

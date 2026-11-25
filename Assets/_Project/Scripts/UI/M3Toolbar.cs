@@ -28,7 +28,7 @@ namespace CardboardXR.UI
         public const float k_DividerHeight = 40f;
 
         public void Initialize(RectTransform[] items, int[] groups, Image[] dividers, RectTransform[] fullWidth, float itemWidth,
-            float padding, float itemY)
+            float padding, float itemY, float dividerGap = 16f)
         {
             m_Items = items;
             m_Groups = groups;
@@ -37,6 +37,7 @@ namespace CardboardXR.UI
             m_ItemWidth = itemWidth;
             m_Padding = padding;
             m_ItemY = itemY;
+            m_DividerGap = dividerGap;
             Layout();
         }
 
@@ -126,7 +127,10 @@ namespace CardboardXR.UI
                 var show = !float.IsNaN(dividerX[g]);
                 m_Dividers[g].gameObject.SetActive(show);
                 if (show)
-                    m_Dividers[g].rectTransform.anchoredPosition = new Vector2(left + dividerX[g], m_ItemY + 8f);
+                {
+                    var dividerOffsetY = m_ItemWidth < 80f ? 2f : 8f;
+                    m_Dividers[g].rectTransform.anchoredPosition = new Vector2(left + dividerX[g], m_ItemY + dividerOffsetY);
+                }
             }
             foreach (var line in m_FullWidth)
             {

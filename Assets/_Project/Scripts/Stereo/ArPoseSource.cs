@@ -1,3 +1,4 @@
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.XR.ARFoundation;
@@ -30,6 +31,7 @@ namespace CardboardXR.Stereo
         HandheldARInputDevice m_Device;
         Sample m_Latest;
         bool m_HasSample;
+        bool m_CameraConfigApplied;
         long m_CameraTimestampNs;
         TrackingState m_TrackingState = TrackingState.None;
 
@@ -53,6 +55,7 @@ namespace CardboardXR.Stereo
         {
             // Poses and images from before a restart are stale.
             m_HasSample = false;
+            m_CameraConfigApplied = false;
             m_CameraTimestampNs = 0;
             m_TrackingState = TrackingState.None;
             m_PoseUpdates = m_CameraFrames = 0;
@@ -105,11 +108,65 @@ namespace CardboardXR.Stereo
                 Debug.Log($"[AR] Tracking state {state} ({subsystem?.notTrackingReason})");
             }
 
+            if (!m_CameraConfigApplied && subsystem != null && ARSession.state >= ARSessionState.Ready)
+                TrySelectHighFrameRateConfig();
+
             if (m_Device == null || !m_Device.added)
                 m_Device = InputSystem.GetDevice<HandheldARInputDevice>();
             if (m_Device != null)
                 ReadPose();
             LogStats();
+        }
+
+        // Selects the highest-framerate ARCore camera configuration (60 fps on Pixel 9) instead of
+        // the default 30 fps, cutting camera frame interval and tracking latency in half.
+        void TrySelectHighFrameRateConfig()
+        {
+            if (m_CameraManager == null || m_CameraManager.subsystem == null)
+                return;
+            try
+            {
+                using var configs = m_CameraManager.GetConfigurations(Allocator.Temp);
+                if (!configs.IsCreated || configs.Length == 0)
+                    return;
+
+                m_CameraConfigApplied = true;
+                var bestIndex = -1;
+                var bestFps = -1;
+                var bestHeightDiff = int.MaxValue;
+                var summary = new System.Text.StringBuilder();
+
+                for (var i = 0; i < configs.Length; i++)
+                {
+                    var c = configs[i];
+                    var fps = c.framerate ?? 0;
+                    if (i > 0) summary.Append(", ");
+                    summary.Append($"{c.width}x{c.height}@{fps}");
+
+                    // Target ~720p at maximum FPS for sharp passthrough with minimum ISP/GPU latency.
+                    var heightDiff = Mathf.Abs(c.height - 720);
+                    if (fps > bestFps || (fps == bestFps && heightDiff < bestHeightDiff))
+                    {
+                        bestFps = fps;
+                        bestHeightDiff = heightDiff;
+                        bestIndex = i;
+                    }
+                }
+
+                if (bestIndex >= 0)
+                {
+                    var chosen = configs[bestIndex];
+                    var current = m_CameraManager.currentConfiguration;
+                    if (!current.HasValue || current.Value != chosen)
+                        m_CameraManager.currentConfiguration = chosen;
+                    Debug.Log($"[AR] Selected camera config {chosen.width}x{chosen.height}@{chosen.framerate ?? 0} fps (available: {summary})");
+                }
+            }
+            catch (System.Exception e)
+            {
+                m_CameraConfigApplied = true;
+                Debug.LogWarning($"[AR] Could not set 60 fps camera config: {e.Message}");
+            }
         }
 
         void ReadPose()

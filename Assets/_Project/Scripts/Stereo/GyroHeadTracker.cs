@@ -267,16 +267,32 @@ namespace CardboardXR.Stereo
         // gyroscope sample at or before it.
         public bool TryGetRotationAt(long timeNs, out Quaternion rotation) => TryGetRotationAt(timeNs, out rotation, out _);
 
-        // Also gives the vertical in the gyroscope's frame at that time.
+        // Also gives the vertical in the gyroscope's frame at that time, slerping between adjacent
+        // history samples for sub-millisecond capture timestamps.
         public bool TryGetRotationAt(long timeNs, out Quaternion rotation, out Vector3d upInSensor)
         {
             for (var i = 1; i <= m_HistoryCount; i++)
             {
                 var index = (m_HistoryNext - i + k_HistoryLength) % k_HistoryLength;
-                if (m_HistoryTimes[index] > timeNs)
+                var t0 = m_HistoryTimes[index];
+                if (t0 > timeNs)
                     continue;
                 var sensorFromStart = m_HistoryRotations[index];
-                rotation = HeadRotation(sensorFromStart.Inverse);
+                var q0 = HeadRotation(sensorFromStart.Inverse);
+                if (i > 1)
+                {
+                    var nextIndex = (index + 1) % k_HistoryLength;
+                    var t1 = m_HistoryTimes[nextIndex];
+                    if (t1 > t0 && timeNs > t0)
+                    {
+                        var alpha = Mathf.Clamp01((float)((double)(timeNs - t0) / (t1 - t0)));
+                        var q1 = HeadRotation(m_HistoryRotations[nextIndex].Inverse);
+                        rotation = Quaternion.Slerp(q0, q1, alpha);
+                        upInSensor = sensorFromStart * new Vector3d(0, 0, 1);
+                        return true;
+                    }
+                }
+                rotation = q0;
                 // Start space has z up.
                 upInSensor = sensorFromStart * new Vector3d(0, 0, 1);
                 return true;

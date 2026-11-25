@@ -1,4 +1,5 @@
 using System.Collections;
+using CardboardXR.UI;
 using UnityEngine;
 
 namespace CardboardXR.Stereo
@@ -32,6 +33,7 @@ namespace CardboardXR.Stereo
         void Awake()
         {
             m_Renderer = GetComponent<MeshRenderer>();
+            m_Renderer.sortingOrder = UiRenderQueue.k_ScreenFadeSortingOrder;
             m_Block = new MaterialPropertyBlock();
             Alpha = 0f;
         }

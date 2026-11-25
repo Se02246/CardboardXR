@@ -157,5 +157,81 @@ namespace CardboardXR.Hands
 
         static Vector2 RoundToAxis(Vector2 v) =>
             Mathf.Abs(v.x) >= Mathf.Abs(v.y) ? new Vector2(Mathf.Sign(v.x), 0f) : new Vector2(0f, Mathf.Sign(v.y));
+
+        // Validates anatomical palm & finger proportions in both 2D image and 3D metric space so
+        // boxes, cables, or background clutter are rejected before driving interaction or visuals.
+        public static bool IsPlausibleHand(Vector2[] imageLandmarks, Vector3[] metricLandmarks, float imageWidth, float imageHeight)
+        {
+            if (imageLandmarks == null || metricLandmarks == null ||
+                imageLandmarks.Length < JointCount || metricLandmarks.Length < JointCount ||
+                imageWidth <= 1f || imageHeight <= 1f)
+                return false;
+
+            var palmSpan2D = PalmSpan(imageLandmarks);
+            if (palmSpan2D < Mathf.Max(18f, imageWidth * 0.022f) || palmSpan2D > imageWidth * 0.62f)
+                return false;
+
+            var palmSize3D = PalmSize(metricLandmarks);
+            if (palmSize3D < 0.030f || palmSize3D > 0.115f)
+                return false;
+
+            var wristToMid3D = Vector3.Distance(metricLandmarks[0], metricLandmarks[9]);
+            var knuckleSpan3D = Vector3.Distance(metricLandmarks[5], metricLandmarks[17]);
+            if (knuckleSpan3D <= 0.015f)
+                return false;
+            var palmAspect = wristToMid3D / knuckleSpan3D;
+            if (palmAspect < 0.65f || palmAspect > 2.60f)
+                return false;
+
+            float ChainLength(int a, int b, int c, int d) =>
+                Vector3.Distance(metricLandmarks[a], metricLandmarks[b]) +
+                Vector3.Distance(metricLandmarks[b], metricLandmarks[c]) +
+                Vector3.Distance(metricLandmarks[c], metricLandmarks[d]);
+
+            var thumbLen = ChainLength(1, 2, 3, 4);
+            if (thumbLen < 0.55f * palmSize3D || thumbLen > 2.60f * palmSize3D)
+                return false;
+
+            var validFingers = 0;
+            int[][] fingers =
+            {
+                new[] { 5, 6, 7, 8 },
+                new[] { 9, 10, 11, 12 },
+                new[] { 13, 14, 15, 16 },
+                new[] { 17, 18, 19, 20 },
+            };
+            for (var f = 0; f < fingers.Length; f++)
+            {
+                var ids = fingers[f];
+                var len = ChainLength(ids[0], ids[1], ids[2], ids[3]);
+                if (len >= 0.55f * palmSize3D && len <= 2.75f * palmSize3D)
+                    validFingers++;
+            }
+            return validFingers >= 3;
+        }
+
+        // Rejects distant hands or background people's hands in front of the viewer.
+        public static bool IsLikelyOwnHand(Vector2[] imageLandmarks, float estimatedDistanceMeters, float imageHeight, bool acquiring)
+        {
+            if (imageLandmarks == null || imageLandmarks.Length < JointCount || imageHeight <= 1f ||
+                float.IsNaN(estimatedDistanceMeters))
+                return false;
+
+            var maxDist = acquiring ? 0.72f : 0.86f;
+            if (estimatedDistanceMeters < 0.14f || estimatedDistanceMeters > maxDist)
+                return false;
+
+            if (acquiring)
+            {
+                var palmSpan = PalmSpan(imageLandmarks);
+                if (imageLandmarks[0].y < imageLandmarks[9].y - palmSpan * 0.25f && estimatedDistanceMeters > 0.45f)
+                    return false;
+
+                var palmMidY = (imageLandmarks[0].y + imageLandmarks[9].y) * 0.5f;
+                if (palmMidY < imageHeight * 0.28f && estimatedDistanceMeters > 0.55f)
+                    return false;
+            }
+            return true;
+        }
     }
 }

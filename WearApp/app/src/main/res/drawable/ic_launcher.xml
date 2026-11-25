@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A pinching hand on a round tile. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#3D5AFE"
+        android:pathData="M24,2a22,22 0,1 0,0.01 0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M17,14a3,3 0,0 1,6 0v8.5l1,0V10a3,3 0,0 1,6 0v12.5l1,0V14a3,3 0,0 1,6 0v13c0,7 -5,12 -11,12c-4.5,0 -7.5,-2.5 -9.5,-6l-4.5,-8a3,3 0,0 1,5 -3l1,1.5z" />
+</vector>

@@ -1,3 +1,4 @@
+using CardboardXR.Stereo;
 using CardboardXR.UI;
 using TMPro;
 using UnityEngine;
@@ -25,6 +26,7 @@ namespace CardboardXR.Demos.Portal
         public override void OnDemoEnter(CoreServices core)
         {
             m_Core = core;
+            core.Placer.SurfaceFilter = PlacementSurfaceFilter.FloorOnly;
             core.Placer.ObjectPrefab = m_PortalPrefab;
             core.Placer.Placed += OnPlaced;
             m_Audio = gameObject.AddComponent<AudioSource>();
@@ -37,6 +39,7 @@ namespace CardboardXR.Demos.Portal
 
         public override void OnDemoExit(CoreServices core)
         {
+            core.Placer.SurfaceFilter = PlacementSurfaceFilter.HorizontalAny;
             core.Placer.Placed -= OnPlaced;
             if (m_Portal != null)
                 m_Portal.Crossed -= OnCrossed;
@@ -89,7 +92,7 @@ namespace CardboardXR.Demos.Portal
         void UpdateHint()
         {
             if (m_Portal == null)
-                m_Hint.text = "Look at the floor and pinch to open a portal there.\nNo highlight on the floor? Look down at it for a moment.";
+                m_Hint.text = "Look at the floor to aim the ring, then pinch to open a portal.";
             else if (!m_Portal.IsInside)
                 m_Hint.text = "Walk through the doorway.\nUnplug the phone first if it's on a cable.";
             else
@@ -104,7 +107,7 @@ namespace CardboardXR.Demos.Portal
             m_Panel = WorldUi.Panel("Portal Panel", transform, new Vector2(440f, 192f), distance);
             m_Hint = M3.Text("Hint", m_Panel, "", M3Theme.Type.BodyLarge, new Vector2(0f, 36f), new Vector2(392f, 72f));
             M3.Button("Move portal", m_Panel, "Move portal", M3Button.Variant.Tonal, new Vector2(0f, -44f), Move, "open_with");
-            WorldUi.PlaceInFront(m_Panel, m_Core.Head, distance, 8f, -25f);
+            WorldUi.PlaceInFront(m_Panel, m_Core.Head, distance, 0f, 0f);
         }
 
         // A soft rush of noise that swells and fades, made in code.
@@ -127,6 +130,12 @@ namespace CardboardXR.Demos.Portal
             var clip = AudioClip.Create("Whoosh", samples.Length, 1, rate, false);
             clip.SetData(samples, 0);
             return clip;
+        }
+
+        public override void OnDemoRefocus(CoreServices core)
+        {
+            if (m_Panel != null && core != null && core.Head != null)
+                WorldUi.BringToFront(m_Panel, core.Head, 1.5f, 0f, 0f);
         }
     }
 }

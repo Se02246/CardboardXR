@@ -72,7 +72,7 @@ namespace CardboardXR.Demos.Video
         }
 
         // Shows the texture in the format, or hides the sphere for null.
-        public void Show(Texture texture, VideoFormat format)
+        public void Show(Texture texture, VideoFormat format, bool flipVertical = false)
         {
             m_ClickSurface.SetActive(texture != null);
             for (var eye = 0; eye < 2; eye++)
@@ -87,8 +87,8 @@ namespace CardboardXR.Demos.Video
                 m_Eyes[eye].GetComponent<MeshFilter>().sharedMesh = format.Projection == Projection.Full360 ? m_Full : m_Half;
                 var rect = format.EyeRect(eye);
                 m_Materials[eye].mainTexture = texture;
-                m_Materials[eye].mainTextureScale = rect.size;
-                m_Materials[eye].mainTextureOffset = rect.position;
+                m_Materials[eye].mainTextureScale = flipVertical ? new Vector2(rect.width, -rect.height) : rect.size;
+                m_Materials[eye].mainTextureOffset = flipVertical ? new Vector2(rect.x, 1f - rect.y) : rect.position;
             }
         }
 

@@ -1,8 +1,12 @@
 using System.Linq;
+using System.Reflection;
 using CardboardXR.Hands;
+using CardboardXR.Interaction;
+using CardboardXR.UI;
 using NUnit.Framework;
 using Unity.Collections;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace CardboardXR.Stereo.Tests
 {
@@ -274,5 +278,473 @@ namespace CardboardXR.Stereo.Tests
         }
 
         static void AssertClose(Vector2 expected, Vector2 actual, string message = "", float tolerance = 1e-5f) =>
-            Assert.That((actual - expected).magnitude, Is.LessThan(tolerance), $"{message} expected {expected}, got {actual}");    }
+            Assert.That((actual - expected).magnitude, Is.LessThan(tolerance), $"{message} expected {expected}, got {actual}");
+
+        static (Vector2[] img, Vector3[] metric) MakeRealisticHand(float palmSpanPx = 90f, float centerX = 480f, float centerY = 300f)
+        {
+            var img = new Vector2[HandGeometry.JointCount];
+            var metric = new Vector3[HandGeometry.JointCount];
+            // Realistic adult 3D scale (palm ~5.5cm)
+            metric[0] = new Vector3(0f, -0.055f, 0f);
+            metric[5] = new Vector3(-0.032f, 0.015f, 0f);
+            metric[9] = new Vector3(-0.008f, 0.018f, 0f);
+            metric[13] = new Vector3(0.014f, 0.015f, 0f);
+            metric[17] = new Vector3(0.034f, 0.006f, 0f);
+
+            metric[1] = new Vector3(-0.028f, -0.032f, -0.006f);
+            metric[2] = new Vector3(-0.046f, -0.010f, -0.010f);
+            metric[3] = new Vector3(-0.060f, 0.014f, -0.012f);
+            metric[4] = new Vector3(-0.070f, 0.036f, -0.012f);
+
+            metric[6] = new Vector3(-0.034f, 0.052f, 0f);
+            metric[7] = new Vector3(-0.035f, 0.078f, 0f);
+            metric[8] = new Vector3(-0.036f, 0.098f, 0f);
+
+            metric[10] = new Vector3(-0.008f, 0.060f, 0f);
+            metric[11] = new Vector3(-0.008f, 0.088f, 0f);
+            metric[12] = new Vector3(-0.008f, 0.110f, 0f);
+
+            metric[14] = new Vector3(0.015f, 0.054f, 0f);
+            metric[15] = new Vector3(0.016f, 0.080f, 0f);
+            metric[16] = new Vector3(0.017f, 0.100f, 0f);
+
+            metric[18] = new Vector3(0.036f, 0.038f, 0f);
+            metric[19] = new Vector3(0.037f, 0.058f, 0f);
+            metric[20] = new Vector3(0.038f, 0.074f, 0f);
+
+            var palmSize = HandGeometry.PalmSize(metric);
+            var pxPerMeter = palmSpanPx / palmSize;
+            for (var i = 0; i < HandGeometry.JointCount; i++)
+                img[i] = new Vector2(centerX + metric[i].x * pxPerMeter, centerY - metric[i].y * pxPerMeter);
+            return (img, metric);
+        }
+
+        [Test]
+        public void NearestUserPalm_PrefersCloserHandAndRejectsTinyOrUpsideDown()
+        {
+            var anchors = PalmDecoder.CreateAnchors();
+            var boxes = new float[PalmDecoder.AnchorCount * PalmDecoder.ValuesPerAnchor];
+            var scores = Enumerable.Repeat(-10f, PalmDecoder.AnchorCount).ToArray();
+
+            const int tinyAnchor = 400;
+            scores[tinyAnchor] = 4f;
+            var to = tinyAnchor * PalmDecoder.ValuesPerAnchor;
+            boxes[to + 2] = 0.03f * PalmDecoder.InputSize;
+            boxes[to + 3] = 0.03f * PalmDecoder.InputSize;
+            Assert.IsFalse(PalmDecoder.TryDecodeNearestUserPalm(boxes, scores, anchors, 0.62f, 0.052f, out _),
+                "tiny distant detections must be rejected");
+
+            const int upsideDownAnchor = 150;
+            scores[upsideDownAnchor] = 4f;
+            var uo = upsideDownAnchor * PalmDecoder.ValuesPerAnchor;
+            boxes[uo + 2] = 0.14f * PalmDecoder.InputSize;
+            boxes[uo + 3] = 0.14f * PalmDecoder.InputSize;
+            boxes[uo + 5] = -10f; // wrist higher on screen than middle knuckle in upper half
+            boxes[uo + 9] = 10f;
+            Assert.IsFalse(PalmDecoder.TryDecodeNearestUserPalm(boxes, scores, anchors, 0.62f, 0.052f, out _),
+                "upside-down hands in upper background must be rejected");
+
+            const int distantValid = 800;
+            scores[distantValid] = 4f;
+            var dO = distantValid * PalmDecoder.ValuesPerAnchor;
+            boxes[dO + 2] = 0.06f * PalmDecoder.InputSize;
+            boxes[dO + 3] = 0.06f * PalmDecoder.InputSize;
+            boxes[dO + 5] = 10f;
+            boxes[dO + 9] = -10f;
+
+            const int closeUser = 1600;
+            scores[closeUser] = 1.5f;
+            var cO = closeUser * PalmDecoder.ValuesPerAnchor;
+            boxes[cO + 2] = 0.24f * PalmDecoder.InputSize;
+            boxes[cO + 3] = 0.24f * PalmDecoder.InputSize;
+            boxes[cO + 5] = 20f;
+            boxes[cO + 9] = -20f;
+
+            Assert.IsTrue(PalmDecoder.TryDecodeNearestUserPalm(boxes, scores, anchors, 0.62f, 0.052f, out var best));
+            AssertClose(anchors[closeUser], best.center, "user's close hand wins priority", 1e-3f);
+        }
+
+        [Test]
+        public void HandPlausibility_AcceptsRealProportionsAndRejectsCollapsedNoise()
+        {
+            var (img, metric) = MakeRealisticHand();
+            Assert.IsTrue(HandGeometry.IsPlausibleHand(img, metric, 960f, 540f));
+
+            var collapsedMetric = (Vector3[])metric.Clone();
+            for (var i = 1; i < HandGeometry.JointCount; i++)
+            {
+                if (i != 5 && i != 9 && i != 13 && i != 17)
+                    collapsedMetric[i] = Vector3.zero;
+            }
+            Assert.IsFalse(HandGeometry.IsPlausibleHand(img, collapsedMetric, 960f, 540f), "collapsed noise fails anatomy check");
+
+            var (tinyImg, _) = MakeRealisticHand(palmSpanPx: 8f);
+            Assert.IsFalse(HandGeometry.IsPlausibleHand(tinyImg, metric, 960f, 540f), "tiny clutter box fails 2D span check");
+        }
+
+        [Test]
+        public void OwnHandFilter_RejectsDistantOrUpperUpsideDownHands()
+        {
+            var (img, _) = MakeRealisticHand(palmSpanPx: 85f, centerX: 480f, centerY: 320f);
+            Assert.IsTrue(HandGeometry.IsLikelyOwnHand(img, 0.45f, 540f, acquiring: true));
+            Assert.IsFalse(HandGeometry.IsLikelyOwnHand(img, 0.80f, 540f, acquiring: true), "beyond acquiring reach");
+
+            var (upperImg, _) = MakeRealisticHand(palmSpanPx: 65f, centerX: 480f, centerY: 110f);
+            Assert.IsFalse(HandGeometry.IsLikelyOwnHand(upperImg, 0.60f, 540f, acquiring: true), "distant background person in upper view");
+
+            var flipped = (Vector2[])img.Clone();
+            (flipped[0], flipped[9]) = (new Vector2(480f, 180f), new Vector2(480f, 260f));
+            Assert.IsFalse(HandGeometry.IsLikelyOwnHand(flipped, 0.55f, 540f, acquiring: true), "upside-down distant hand");
+        }
+
+        [Test]
+        public void PinchMetric_RejectsDepthSeparatedOverlap()
+        {
+            var (img, metric) = MakeRealisticHand();
+            // Fingertips appear right on top of each other in 2D, but are 5 cm apart in 3D depth.
+            img[HandGeometry.IndexTip] = img[HandGeometry.ThumbTip] + new Vector2(2f, 0f);
+            metric[HandGeometry.IndexTip] = metric[HandGeometry.ThumbTip] + new Vector3(0f, 0f, 0.050f);
+            var depthSeparated = PinchSensor.ComputePinchMetric(img, metric);
+            Assert.GreaterOrEqual(depthSeparated, PinchSensor.k_CloseRatio, "depth-separated fingers must not count as pinched");
+
+            // Truly touching in both 2D and 3D.
+            metric[HandGeometry.IndexTip] = metric[HandGeometry.ThumbTip] + new Vector3(0.004f, 0f, 0.002f);
+            var touching = PinchSensor.ComputePinchMetric(img, metric);
+            Assert.Less(touching, PinchSensor.k_CloseRatio);
+        }
+
+        sealed class TestVisualScrollTarget : MonoBehaviour, IVisualScrollTarget
+        {
+            public RectTransform Rect;
+            public int Begins;
+            public int Moves;
+            public int Ends;
+            public Vector2 LastLocal;
+            public Vector2 LastDelta;
+            public bool LastCancelled;
+
+            public RectTransform ScrollRectTransform => Rect;
+            public bool CanVisualScroll => Rect != null;
+            public void OnVisualTouchBegin(Vector2 localPoint)
+            {
+                Begins++;
+                LastLocal = localPoint;
+            }
+            public void OnVisualTouchMove(Vector2 localPoint, Vector2 localDelta)
+            {
+                Moves++;
+                LastLocal = localPoint;
+                LastDelta = localDelta;
+            }
+            public void OnVisualTouchEnd(Vector2 localPoint, bool cancelled)
+            {
+                Ends++;
+                LastLocal = localPoint;
+                LastCancelled = cancelled;
+            }
+        }
+
+        [Test]
+        public void VisualPinchScroller_GazeOnSurfaceStartsDragThatFollowsTheHandAnywhere()
+        {
+            VisualPinchScroller.Reset();
+            var headGo = new GameObject("Head");
+            var canvasGo = new GameObject("Scroll Canvas", typeof(RectTransform), typeof(Canvas), typeof(Image), typeof(GazeCanvas), typeof(TestVisualScrollTarget));
+            var outsideGo = new GameObject("Outside Target");
+            try
+            {
+                var gaze = headGo.AddComponent<GazePointer>();
+                var canvas = canvasGo.GetComponent<Canvas>();
+                canvas.renderMode = RenderMode.WorldSpace;
+                var rt = (RectTransform)canvasGo.transform;
+                rt.SetPositionAndRotation(new Vector3(0f, 0f, 2f), Quaternion.identity);
+                rt.sizeDelta = new Vector2(400f, 300f);
+                rt.localScale = Vector3.one * 0.002f; // 0.8 m wide x 0.6 m tall
+                var img = canvasGo.GetComponent<Image>();
+                img.raycastTarget = true;
+                var scroll = canvasGo.GetComponent<TestVisualScrollTarget>();
+                scroll.Rect = rt;
+                GraphicRegistry.RegisterRaycastGraphicForCanvas(canvas, img);
+                Canvas.ForceUpdateCanvases();
+
+                var lowPinchRay = new Ray(Vector3.zero, new Vector3(0f, -0.5f, 1f).normalized);
+                VisualPinchScroller.SyncPinchRay(lowPinchRay);
+                Assert.IsFalse(VisualPinchScroller.TryBegin(PinchSource.Camera, gaze, outsideGo));
+                Assert.IsTrue(VisualPinchScroller.TryBegin(PinchSource.Camera, gaze, img.gameObject));
+                Assert.IsTrue(VisualPinchScroller.IsActive);
+
+                var movedUpRay = new Ray(Vector3.zero, new Vector3(0f, -0.4f, 1f).normalized);
+                VisualPinchScroller.UpdateHand(movedUpRay, true, true, 0.03f);
+                Assert.IsTrue(VisualPinchScroller.IsDragging);
+                Assert.AreEqual(1, scroll.Begins);
+                Assert.AreEqual(1, scroll.Moves);
+                Assert.Greater(scroll.LastDelta.y, 60f);
+                Assert.Less(Mathf.Abs(scroll.LastDelta.x), 1f);
+
+                var farRightRay = new Ray(Vector3.zero, new Vector3(0.9f, -0.4f, 1f).normalized);
+                VisualPinchScroller.UpdateHand(farRightRay, true, true, 0.03f);
+                Assert.IsTrue(VisualPinchScroller.IsDragging);
+                Assert.AreEqual(2, scroll.Moves);
+
+                VisualPinchScroller.UpdateHand(farRightRay, true, false, 0.03f);
+                Assert.IsFalse(VisualPinchScroller.IsActive);
+                Assert.AreEqual(1, scroll.Ends);
+                Assert.IsFalse(scroll.LastCancelled);
+            }
+            finally
+            {
+                VisualPinchScroller.Reset();
+                Object.DestroyImmediate(outsideGo);
+                Object.DestroyImmediate(canvasGo);
+                Object.DestroyImmediate(headGo);
+            }
+        }
+
+        [Test]
+        public void PredictOffset_FollowsVelocityAndClampsMaxDistance()
+        {
+            Assert.AreEqual(Vector2.zero, PinchSensor.PredictOffset(Vector2.zero, 0.04f, 100f));
+            Assert.AreEqual(Vector2.zero, PinchSensor.PredictOffset(new Vector2(300f, 0f), 0f, 100f));
+
+            var offset = PinchSensor.PredictOffset(new Vector2(400f, -200f), 0.04f, 100f);
+            AssertClose(new Vector2(13.6f, -6.8f), offset, "forward velocity prediction", 1e-3f);
+
+            var clamped = PinchSensor.PredictOffset(new Vector2(5000f, 0f), 0.2f, 60f);
+            Assert.LessOrEqual(clamped.magnitude, 60.001f);
+            Assert.Greater(clamped.x, 59f);
+        }
+
+        [Test]
+        public void PinchSensor_ShouldReleasePinch_FastOnClearSeparationAndDebouncesBorderline()
+        {
+            var openStreak = 0;
+            var borderline = (PinchSensor.k_OpenRatio + PinchSensor.k_FastOpenRatio) * 0.5f;
+
+            // Single borderline sample is debounced, and drops back into pinch range reset the streak.
+            Assert.IsFalse(PinchSensor.ShouldReleasePinch(borderline, ref openStreak));
+            Assert.AreEqual(1, openStreak);
+            Assert.IsFalse(PinchSensor.ShouldReleasePinch(PinchSensor.k_CloseRatio + 0.05f, ref openStreak));
+            Assert.AreEqual(0, openStreak);
+
+            // Two consecutive borderline samples release.
+            Assert.IsFalse(PinchSensor.ShouldReleasePinch(borderline, ref openStreak));
+            Assert.IsTrue(PinchSensor.ShouldReleasePinch(borderline, ref openStreak));
+            Assert.AreEqual(0, openStreak);
+
+            // Clear separation releases immediately in 1 frame with zero lag.
+            Assert.IsTrue(PinchSensor.ShouldReleasePinch(PinchSensor.k_FastOpenRatio, ref openStreak));
+            Assert.AreEqual(0, openStreak);
+        }
+
+        [Test]
+        public void VisualPinchScroller_SinglePinchOverScreenClicksAtGazePointerAndSkipsActionButtons()
+        {
+            VisualPinchScroller.Reset();
+            var headGo = new GameObject("Head");
+            var canvasGo = new GameObject("Scroll Canvas", typeof(RectTransform), typeof(Canvas), typeof(Image), typeof(GazeCanvas), typeof(PointerEventRecorder), typeof(TestVisualScrollTarget));
+            var btnGo = new GameObject("Action Button", typeof(RectTransform), typeof(Button), typeof(M3Button));
+            var outsideGo = new GameObject("Outside Target");
+            try
+            {
+                var gaze = headGo.AddComponent<GazePointer>();
+                var canvas = canvasGo.GetComponent<Canvas>();
+                canvas.renderMode = RenderMode.WorldSpace;
+                var rt = (RectTransform)canvasGo.transform;
+                rt.SetPositionAndRotation(new Vector3(0f, 0f, 2f), Quaternion.identity);
+                rt.sizeDelta = new Vector2(400f, 300f);
+                rt.localScale = Vector3.one * 0.002f;
+                var img = canvasGo.GetComponent<Image>();
+                img.raycastTarget = true;
+                var recorder = canvasGo.GetComponent<PointerEventRecorder>();
+                var scroll = canvasGo.GetComponent<TestVisualScrollTarget>();
+                scroll.Rect = rt;
+
+                btnGo.transform.SetParent(canvasGo.transform, false);
+                btnGo.GetComponent<M3Button>().Initialize(M3Button.Variant.Tonal, btnGo.GetComponent<Button>(), img, null, null, null, null, Color.white);
+
+                GraphicRegistry.RegisterRaycastGraphicForCanvas(canvas, img);
+                Canvas.ForceUpdateCanvases();
+
+                gaze.UpdateGaze();
+                Assert.AreSame(img.gameObject, gaze.Target);
+
+                var centerRay = new Ray(Vector3.zero, Vector3.forward);
+                VisualPinchScroller.SyncPinchRay(centerRay);
+
+                Assert.IsFalse(VisualPinchScroller.TryBegin(PinchSource.Camera, gaze, btnGo, gazeIsButton: true),
+                    "action buttons inside scrollable panels must click directly instead of scrolling");
+                Assert.IsFalse(VisualPinchScroller.TryBegin(PinchSource.Camera, gaze, outsideGo),
+                    "pinch over a scrollable surface must not hijack a target on another object");
+
+                Assert.IsTrue(VisualPinchScroller.TryBegin(PinchSource.Camera, gaze, img.gameObject));
+                VisualPinchScroller.UpdateHand(centerRay, true, false, 0.02f);
+                Assert.IsFalse(VisualPinchScroller.IsActive);
+                Assert.AreEqual(0, scroll.Begins);
+                Assert.IsTrue(recorder.events.Contains("click"),
+                    "quick single pinch over a scrollable surface must click where the pointer aims");
+            }
+            finally
+            {
+                VisualPinchScroller.Reset();
+                Object.DestroyImmediate(outsideGo);
+                Object.DestroyImmediate(btnGo);
+                Object.DestroyImmediate(canvasGo);
+                Object.DestroyImmediate(headGo);
+            }
+        }
+
+        [Test]
+        public void RenderLayerHierarchy_ReticleStrictlyAbovePalmOverlayAndHandContour()
+        {
+            Assert.Greater(UiRenderQueue.k_HandContourSortingOrder, 0);
+            Assert.Less(UiRenderQueue.k_HandContourSortingOrder, UiRenderQueue.k_PalmOverlaySortingOrder);
+            Assert.Less(UiRenderQueue.k_PalmOverlaySortingOrder, UiRenderQueue.k_HandRaySortingOrder);
+            Assert.Less(UiRenderQueue.k_HandRaySortingOrder, UiRenderQueue.k_ReticleSortingOrder);
+            Assert.Less(UiRenderQueue.k_ReticleSortingOrder, UiRenderQueue.k_ScreenFadeSortingOrder);
+
+            var go = new GameObject("Test Reticle", typeof(MeshFilter), typeof(MeshRenderer), typeof(GazeReticle));
+            try
+            {
+                var reticle = go.GetComponent<GazeReticle>();
+                typeof(GazeReticle).GetMethod("Awake", BindingFlags.Instance | BindingFlags.NonPublic)?.Invoke(reticle, null);
+                Assert.AreEqual(UiRenderQueue.k_ReticleSortingOrder, go.GetComponent<MeshRenderer>().sortingOrder);
+            }
+            finally
+            {
+                Object.DestroyImmediate(go);
+            }
+        }
+
+        [Test]
+        public void HandContourVectorMesh_Creates4SubmeshesExpandsOutwardFadesCuffAndTogglesPinchRing()
+        {
+            var mesh = HandJointsView.CreateContourMesh();
+            try
+            {
+                Assert.AreEqual(4, mesh.subMeshCount);
+                Assert.AreEqual(HandJointsView.ContourVertexCount, mesh.vertexCount);
+
+                var joints = new Vector2[22];
+                joints[0] = new Vector2(0f, -0.05f);
+                joints[1] = new Vector2(-0.025f, -0.02f);
+                joints[2] = new Vector2(-0.040f, 0.01f);
+                joints[3] = new Vector2(-0.050f, 0.035f);
+                joints[4] = new Vector2(-0.058f, 0.058f);
+                joints[5] = new Vector2(-0.022f, 0.03f);
+                joints[6] = new Vector2(-0.024f, 0.068f);
+                joints[7] = new Vector2(-0.025f, 0.095f);
+                joints[8] = new Vector2(-0.025f, 0.118f);
+                joints[9] = new Vector2(0f, 0.034f);
+                joints[10] = new Vector2(0f, 0.075f);
+                joints[11] = new Vector2(0f, 0.105f);
+                joints[12] = new Vector2(0f, 0.130f);
+                joints[13] = new Vector2(0.020f, 0.030f);
+                joints[14] = new Vector2(0.022f, 0.068f);
+                joints[15] = new Vector2(0.023f, 0.095f);
+                joints[16] = new Vector2(0.024f, 0.115f);
+                joints[17] = new Vector2(0.038f, 0.022f);
+                joints[18] = new Vector2(0.042f, 0.052f);
+                joints[19] = new Vector2(0.044f, 0.072f);
+                joints[20] = new Vector2(0.046f, 0.090f);
+                joints[21] = new Vector2(0f, -0.145f);
+
+                var radii = new float[22];
+                for (var i = 0; i < 22; i++)
+                    radii[i] = i == 0 || i == 21 ? 0.035f : 0.008f;
+
+                var verts = new Vector3[HandJointsView.ContourVertexCount];
+                var uvs = new Vector2[HandJointsView.ContourVertexCount];
+                const float strokeW = 0.002f;
+                const float haloW = 0.003f;
+
+                HandJointsView.FillContourGeometry(joints, radii, Vector2.down, 0.095f,
+                    strokeW, haloW, joints[8], pinchClose: 0.2f, pinching: false, palmScale: 0.07f, verts, uvs);
+
+                var vertsPerLayer = (HandJointsView.ContourVertexCount - 32) / 3;
+                var minY0 = float.PositiveInfinity;
+                var maxY0 = float.NegativeInfinity;
+                var minY1 = float.PositiveInfinity;
+                var maxY1 = float.NegativeInfinity;
+                var minY2 = float.PositiveInfinity;
+                var maxY2 = float.NegativeInfinity;
+                var maxFingerFade = 0f;
+                var minCuffFade = 1f;
+
+                for (var i = 0; i < HandJointsView.ContourVertexCount; i++)
+                {
+                    Assert.IsFalse(float.IsNaN(verts[i].x) || float.IsNaN(verts[i].y));
+                    if (i < vertsPerLayer)
+                    {
+                        minY0 = Mathf.Min(minY0, verts[i].y);
+                        maxY0 = Mathf.Max(maxY0, verts[i].y);
+                        if (verts[i].y > 0.10f) maxFingerFade = Mathf.Max(maxFingerFade, uvs[i].x);
+                        if (verts[i].y < -0.13f) minCuffFade = Mathf.Min(minCuffFade, uvs[i].x);
+                    }
+                    else if (i < vertsPerLayer * 2)
+                    {
+                        minY1 = Mathf.Min(minY1, verts[i].y);
+                        maxY1 = Mathf.Max(maxY1, verts[i].y);
+                    }
+                    else if (i < vertsPerLayer * 3)
+                    {
+                        minY2 = Mathf.Min(minY2, verts[i].y);
+                        maxY2 = Mathf.Max(maxY2, verts[i].y);
+                    }
+                    else
+                    {
+                        Assert.AreEqual(0f, uvs[i].x, 1e-4f, "Pinch ring should be inactive when pinchClose <= 0.45");
+                    }
+                }
+
+                Assert.Greater(maxY1, maxY0 + strokeW * 0.8f);
+                Assert.Greater(maxY2, maxY1 + haloW * 0.8f);
+                Assert.Less(minY1, minY0 - strokeW * 0.8f);
+                Assert.Less(minY2, minY1 - haloW * 0.8f);
+                Assert.AreEqual(1f, maxFingerFade, 1e-3f);
+                Assert.AreEqual(0f, minCuffFade, 1e-3f);
+
+                HandJointsView.FillContourGeometry(joints, radii, Vector2.down, 0.095f,
+                    strokeW, haloW, joints[8], pinchClose: 0.9f, pinching: true, palmScale: 0.07f, verts, uvs);
+                for (var i = vertsPerLayer * 3; i < HandJointsView.ContourVertexCount; i++)
+                    Assert.AreEqual(1f, uvs[i].x, 1e-4f, "Pinch ring should illuminate when pinching");
+            }
+            finally
+            {
+                Object.DestroyImmediate(mesh);
+            }
+        }
+
+        [Test]
+        public void PinchSensor_ComputeDownsampleStride_KeepsUltrawideFramesFullSize()
+        {
+            Assert.AreEqual(1, PinchSensor.ComputeDownsampleStride(320));
+            Assert.AreEqual(1, PinchSensor.ComputeDownsampleStride(480));
+            Assert.AreEqual(1, PinchSensor.ComputeDownsampleStride(960));
+            Assert.AreEqual(1, PinchSensor.ComputeDownsampleStride(1280));
+            Assert.AreEqual(2, PinchSensor.ComputeDownsampleStride(1920));
+            Assert.AreEqual(2, PinchSensor.ComputeDownsampleStride(2560));
+        }
+
+        [Test]
+        public void HandStabilization_DeadbandsStillHandVelocityAndSmoothsDisplayJitter()
+        {
+            // PinchSensor stationary deadband zeros out sub-threshold noise while keeping fast motion prediction.
+            Assert.AreEqual(Vector2.zero, PinchSensor.PredictOffset(new Vector2(10f, -8f), 0.04f, 64f));
+            var movingOffset = PinchSensor.PredictOffset(new Vector2(140f, 0f), 0.04f, 64f);
+            Assert.Greater(movingOffset.x, 1f);
+
+            // HandTracker stationary deadband suppresses 3D drift while preserving intentional movement.
+            Assert.AreEqual(Vector3.zero, HandTracker.DampStationaryVelocity(new Vector3(0.02f, -0.01f, 0.01f)));
+            var movingVel = HandTracker.DampStationaryVelocity(new Vector3(0.30f, 0f, 0f));
+            Assert.Greater(movingVel.x, 0.25f);
+
+            // HandJointsView display smoother damps micro-jitter (1.5 mm) while tracking 10 mm moves cleanly.
+            var origin = Vector3.zero;
+            var jitterStep = HandJointsView.SmoothDisplayPoint(origin, new Vector3(0.0015f, 0f, 0f), 1f / 60f);
+            Assert.Less(jitterStep.x / 0.0015f, 0.35f);
+
+            var moveStep = HandJointsView.SmoothDisplayPoint(origin, new Vector3(0.010f, 0f, 0f), 1f / 60f);
+            Assert.Greater(moveStep.x / 0.010f, 0.85f);
+        }
+    }
 }

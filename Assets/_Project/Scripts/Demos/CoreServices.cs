@@ -53,12 +53,16 @@ namespace CardboardXR.Demos
 
         // Switches to the state, in an order that holds: hands first, since they need nothing else;
         // then 6DoF, which passthrough needs; then passthrough, as a choice 6DoF won't undo.
-        public void Apply(CoreState state)
+        public void Apply(CoreState state, bool forceArCoreSixDof = false)
         {
-            m_HandTracker.enabled = state.Hands;
+            var useUltrawide = m_Passthrough != null && m_Passthrough.UseUltrawide &&
+                               state.Passthrough && !PinchRouter.SceneWantsHandPinch && !forceArCoreSixDof;
+            // Always keep HandTracker on in 6DoF (when not in Ultrawide) so open-palm Home detection
+            // works in every single app; PinchRouter.HandPinchMuted still protects Watch clicks.
+            m_HandTracker.enabled = state.SixDof && !useUltrawide;
             if (!state.Passthrough)
                 m_Passthrough.Choose(false);
-            m_Fusion.SetMode(state.SixDof ? HeadPoseFusion.Mode.SixDof : HeadPoseFusion.Mode.ThreeDof);
+            m_Fusion.SetMode(state.SixDof && !useUltrawide ? HeadPoseFusion.Mode.SixDof : HeadPoseFusion.Mode.ThreeDof);
             if (state.Passthrough)
                 m_Passthrough.Choose(true);
         }

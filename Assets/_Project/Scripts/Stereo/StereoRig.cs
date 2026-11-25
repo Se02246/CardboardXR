@@ -18,6 +18,12 @@ namespace CardboardXR.Stereo
         // picture. The mono view shows the left eye's.
         public const int LeftEyeOnlyLayer = 27;
         public const int RightEyeOnlyLayer = 28;
+        // Overlay layer rendered on top of fullscreen SBS phone-app backdrops (hand contours, reticle, exit button).
+        public const int FullscreenOverlayLayer = 26;
+
+        static readonly int k_SrcBlendId = Shader.PropertyToID("_SrcBlend");
+        static readonly int k_DstBlendId = Shader.PropertyToID("_DstBlend");
+        static readonly int k_FlipYId = Shader.PropertyToID("_FlipY");
 
         [SerializeField] ViewerParams m_Viewer = ViewerParams.CardboardV1;
         [Tooltip("Physical landscape screen size in meters. Zero uses the size the device reports.")]
@@ -26,11 +32,11 @@ namespace CardboardXR.Stereo
         [SerializeField] float m_NearClip = 0.05f;
         [SerializeField] float m_FarClip = 1000f;
         [Tooltip("Eye texture resolution relative to half the screen each. The \"renderScale\" launch " +
-                 "option overrides it, as a percentage: 70 means 0.7.")]
-        [SerializeField, Range(0.25f, 2f)] float m_RenderScale = 1f;
+                 "option overrides it, as a percentage: 125 means 1.25.")]
+        [SerializeField, Range(0.25f, 2f)] float m_RenderScale = 1.10f;
         [Tooltip("Anti-aliasing samples per eye texture: 1, 2, 4 or 8. The \"msaa\" launch option overrides it.")]
         [SerializeField, Range(1, 8)] int m_Msaa = 2;
-        [SerializeField] Color m_BackgroundColor = new(0.1f, 0.1f, 0.12f);
+        [SerializeField] Color m_BackgroundColor = new(0.008f, 0.009f, 0.014f);
         [Tooltip("Android runs the display at the nearest refresh rate it supports, up to this. " +
                  "The \"fps\" launch option overrides it.")]
         [SerializeField] int m_TargetFrameRate = 120;
@@ -53,12 +59,27 @@ namespace CardboardXR.Stereo
         Mesh m_MarkerMesh;
         Material m_MarkerMaterial;
         Texture2D m_MarkerTexture;
+        GameObject m_MarkerObject;
         GameObject m_Compositor;
         LensDistortion m_Lens;
+
+        bool m_FullscreenBackdropActive;
+        Texture m_FullscreenBackdropTexture;
+        bool m_FullscreenBackdropFlipY;
+        Mesh m_FullscreenBackdropMesh;
+        Material m_FullscreenBackdropMaterial;
+        GameObject m_FullscreenBackdropObject;
+        Camera m_MonoBackdropCamera;
+        readonly int[] m_SavedCullingMasks = new int[2];
+        readonly CameraClearFlags[] m_SavedClearFlags = new CameraClearFlags[2];
+        readonly Color[] m_SavedBgColors = new Color[2];
+        bool m_HasSavedCameraState;
 
         // Whether the scene is drawn once to the whole screen, instead of once per eye through the
         // viewer's lenses.
         public bool IsMono => m_Mono;
+        public bool IsFullscreenBackdropActive => m_FullscreenBackdropActive;
+        public Texture FullscreenBackdropTexture => m_FullscreenBackdropTexture;
 
         // Puts both eyes at one point, so nothing the eye cameras draw has any disparity. Passthrough
         // turns it on: its picture is one flat image shown to both eyes at a single depth, and virtual
@@ -93,6 +114,7 @@ namespace CardboardXR.Stereo
         {
             var frameRate = LaunchOptions.GetInt("fps", m_TargetFrameRate);
             Application.targetFrameRate = frameRate;
+            Application.runInBackground = true;
             // Both cost fill rate and bandwidth, which is heat: they're launch options so a run can be
             // compared against another without a rebuild, while the phone is unplugged.
             var renderScale = LaunchOptions.GetInt("renderScale", 0);
@@ -124,6 +146,24 @@ namespace CardboardXR.Stereo
         }
 
         void OnDisable() => Teardown();
+
+        public void SetFullscreenBackdrop(Texture texture, bool flipY = true)
+        {
+            m_FullscreenBackdropActive = texture != null;
+            m_FullscreenBackdropTexture = texture;
+            m_FullscreenBackdropFlipY = flipY;
+            ApplyFullscreenBackdropState();
+            PlaceEyes();
+        }
+
+        public void ClearFullscreenBackdrop()
+        {
+            m_FullscreenBackdropActive = false;
+            m_FullscreenBackdropTexture = null;
+            m_FullscreenBackdropFlipY = false;
+            ApplyFullscreenBackdropState();
+            PlaceEyes();
+        }
 
         // Switches between the two eyes through the viewer's lenses and one view on the whole screen.
         public void ToggleMono() => SetMono(!m_Mono);
@@ -172,6 +212,7 @@ namespace CardboardXR.Stereo
                 // distortion meshes and no alignment marker, and the scene is drawn once instead of
                 // twice. It sits midway between where the eyes would be.
                 CreateMonoEye();
+                ApplyFullscreenBackdropState();
                 return;
             }
 
@@ -179,6 +220,7 @@ namespace CardboardXR.Stereo
             CreateEye(Eye.Right);
             PlaceEyes();
             CreateCompositor(screenSize);
+            ApplyFullscreenBackdropState();
         }
 
         // The mono view: an ordinary perspective camera drawing straight to the screen, kept in
@@ -210,6 +252,9 @@ namespace CardboardXR.Stereo
             {
                 name = $"{eye} Eye",
                 antiAliasing = m_Msaa,
+                filterMode = FilterMode.Bilinear,
+                anisoLevel = 4,
+                wrapMode = TextureWrapMode.Clamp,
             };
 
             var eyeObject = new GameObject($"{eye} Eye");
@@ -231,14 +276,15 @@ namespace CardboardXR.Stereo
             m_EyeCameras[index] = eyeCamera;
         }
 
-        // Each eye at its lens offset, or both at the point between them while MonoEyes.
+        // Each eye at its lens offset, or both at the point between them while MonoEyes or fullscreen backdrop.
         void PlaceEyes()
         {
+            var zeroParallax = m_MonoEyes || m_FullscreenBackdropActive;
             var together = (m_EyeOffsets[0] + m_EyeOffsets[1]) / 2f;
             for (var i = 0; i < 2; i++)
             {
                 if (m_EyeCameras[i] != null)
-                    m_EyeCameras[i].transform.localPosition = m_MonoEyes ? together : m_EyeOffsets[i];
+                    m_EyeCameras[i].transform.localPosition = zeroParallax ? together : m_EyeOffsets[i];
             }
         }
 
@@ -286,10 +332,10 @@ namespace CardboardXR.Stereo
                 mainTexture = m_MarkerTexture,
                 renderQueue = (int)RenderQueue.Overlay + 1,
             };
-            AddCompositorMesh("Alignment Marker", m_MarkerMesh, m_MarkerMaterial);
+            m_MarkerObject = AddCompositorMesh("Alignment Marker", m_MarkerMesh, m_MarkerMaterial);
         }
 
-        void AddCompositorMesh(string name, Mesh mesh, Material material)
+        GameObject AddCompositorMesh(string name, Mesh mesh, Material material)
         {
             // The shader places vertices on the screen itself, so the transform is irrelevant;
             // huge bounds keep the renderer from being culled.
@@ -302,41 +348,232 @@ namespace CardboardXR.Stereo
             meshRenderer.sharedMaterial = material;
             meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
             meshRenderer.receiveShadows = false;
+            return meshObject;
+        }
+
+        void EnsureFullscreenBackdropObjects(Transform parent)
+        {
+            if (parent == null || m_DistortionShader == null)
+                return;
+            if (m_FullscreenBackdropMesh == null)
+                m_FullscreenBackdropMesh = CreateFullscreenQuadMesh();
+            if (m_FullscreenBackdropMaterial == null)
+            {
+                m_FullscreenBackdropMaterial = new Material(m_DistortionShader)
+                {
+                    name = "Fullscreen Backdrop",
+                    renderQueue = (int)RenderQueue.Overlay - 1,
+                };
+                m_FullscreenBackdropMaterial.SetFloat(k_SrcBlendId, (float)BlendMode.One);
+                m_FullscreenBackdropMaterial.SetFloat(k_DstBlendId, (float)BlendMode.Zero);
+            }
+            if (m_FullscreenBackdropObject == null)
+            {
+                m_FullscreenBackdropObject = new GameObject("Fullscreen Backdrop") { layer = CompositorLayer };
+                m_FullscreenBackdropObject.transform.SetParent(parent, false);
+                m_FullscreenBackdropObject.transform.localPosition = Vector3.forward;
+                m_FullscreenBackdropObject.AddComponent<MeshFilter>().sharedMesh = m_FullscreenBackdropMesh;
+                var mr = m_FullscreenBackdropObject.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = m_FullscreenBackdropMaterial;
+                mr.shadowCastingMode = ShadowCastingMode.Off;
+                mr.receiveShadows = false;
+                m_FullscreenBackdropObject.SetActive(false);
+            }
+        }
+
+        void ApplyFullscreenBackdropState()
+        {
+            var eyeCount = m_Mono ? 1 : 2;
+            if (m_FullscreenBackdropActive)
+            {
+                if (!m_HasSavedCameraState)
+                {
+                    for (var i = 0; i < eyeCount; i++)
+                    {
+                        var cam = m_EyeCameras[i];
+                        if (cam == null)
+                            continue;
+                        m_SavedCullingMasks[i] = cam.cullingMask;
+                        m_SavedClearFlags[i] = cam.clearFlags;
+                        m_SavedBgColors[i] = cam.backgroundColor;
+                    }
+                    m_HasSavedCameraState = true;
+                }
+
+                if (m_Mono)
+                {
+                    if (m_MonoBackdropCamera == null)
+                    {
+                        var camGo = new GameObject("Mono Backdrop") { layer = CompositorLayer };
+                        m_MonoBackdropCamera = camGo.AddComponent<Camera>();
+                        m_MonoBackdropCamera.stereoTargetEye = StereoTargetEyeMask.None;
+                        m_MonoBackdropCamera.clearFlags = CameraClearFlags.SolidColor;
+                        m_MonoBackdropCamera.backgroundColor = Color.black;
+                        m_MonoBackdropCamera.cullingMask = 1 << CompositorLayer;
+                        m_MonoBackdropCamera.orthographic = true;
+                        m_MonoBackdropCamera.nearClipPlane = 0.01f;
+                        m_MonoBackdropCamera.farClipPlane = 10f;
+                        m_MonoBackdropCamera.allowHDR = false;
+                        m_MonoBackdropCamera.allowMSAA = false;
+                        m_MonoBackdropCamera.depth = -1;
+                    }
+                    EnsureFullscreenBackdropObjects(m_MonoBackdropCamera.transform);
+                    m_MonoBackdropCamera.enabled = true;
+                    if (m_EyeCameras[0] != null)
+                    {
+                        m_EyeCameras[0].cullingMask = 1 << FullscreenOverlayLayer;
+                        m_EyeCameras[0].clearFlags = CameraClearFlags.Depth;
+                    }
+                }
+                else
+                {
+                    if (m_Compositor != null)
+                        EnsureFullscreenBackdropObjects(m_Compositor.transform);
+                    for (var i = 0; i < 2; i++)
+                    {
+                        var cam = m_EyeCameras[i];
+                        if (cam != null)
+                        {
+                            cam.cullingMask = 1 << FullscreenOverlayLayer;
+                            cam.clearFlags = CameraClearFlags.SolidColor;
+                            cam.backgroundColor = new Color(0f, 0f, 0f, 0f);
+                        }
+                        if (m_Materials[i] != null)
+                        {
+                            m_Materials[i].SetFloat(k_SrcBlendId, (float)BlendMode.One);
+                            m_Materials[i].SetFloat(k_DstBlendId, (float)BlendMode.OneMinusSrcAlpha);
+                        }
+                    }
+                    if (m_MarkerObject != null)
+                        m_MarkerObject.SetActive(false);
+                }
+
+                if (m_FullscreenBackdropMaterial != null)
+                {
+                    m_FullscreenBackdropMaterial.mainTexture = m_FullscreenBackdropTexture;
+                    m_FullscreenBackdropMaterial.SetFloat(k_FlipYId, m_FullscreenBackdropFlipY ? 1f : 0f);
+                }
+                if (m_FullscreenBackdropObject != null)
+                    m_FullscreenBackdropObject.SetActive(true);
+            }
+            else
+            {
+                if (m_FullscreenBackdropObject != null)
+                    m_FullscreenBackdropObject.SetActive(false);
+                if (m_FullscreenBackdropMaterial != null)
+                    m_FullscreenBackdropMaterial.mainTexture = null;
+                if (m_MonoBackdropCamera != null)
+                    m_MonoBackdropCamera.enabled = false;
+
+                if (m_HasSavedCameraState)
+                {
+                    for (var i = 0; i < eyeCount; i++)
+                    {
+                        var cam = m_EyeCameras[i];
+                        if (cam == null)
+                            continue;
+                        cam.cullingMask = m_SavedCullingMasks[i];
+                        cam.clearFlags = m_SavedClearFlags[i];
+                        cam.backgroundColor = m_SavedBgColors[i];
+                    }
+                    m_HasSavedCameraState = false;
+                }
+
+                if (!m_Mono)
+                {
+                    for (var i = 0; i < 2; i++)
+                    {
+                        if (m_Materials[i] != null)
+                        {
+                            m_Materials[i].SetFloat(k_SrcBlendId, (float)BlendMode.One);
+                            m_Materials[i].SetFloat(k_DstBlendId, (float)BlendMode.Zero);
+                        }
+                    }
+                    if (m_MarkerObject != null)
+                        m_MarkerObject.SetActive(true);
+                }
+            }
+        }
+
+        static Mesh CreateFullscreenQuadMesh()
+        {
+            var mesh = new Mesh
+            {
+                name = "Fullscreen Backdrop Quad",
+                bounds = new Bounds(Vector3.zero, Vector3.one * 1e6f),
+            };
+            mesh.SetVertices(new[]
+            {
+                new Vector3(-1f, -1f, 0f),
+                new Vector3(-1f, 1f, 0f),
+                new Vector3(1f, 1f, 0f),
+                new Vector3(1f, -1f, 0f),
+            });
+            mesh.SetUVs(0, new[]
+            {
+                new Vector2(0f, 0f),
+                new Vector2(0f, 1f),
+                new Vector2(1f, 1f),
+                new Vector2(1f, 0f),
+            });
+            mesh.SetTriangles(new[] { 0, 1, 2, 0, 2, 3 }, 0);
+            return mesh;
+        }
+
+        static void DestroyObjectSafe(Object obj)
+        {
+            if (obj == null)
+                return;
+            if (Application.isPlaying)
+                Destroy(obj);
+            else
+                DestroyImmediate(obj);
         }
 
         void Teardown()
         {
+            m_HasSavedCameraState = false;
+            m_MarkerObject = null;
+
             for (var i = 0; i < 2; i++)
             {
                 if (m_EyeCameras[i] != null)
-                    Destroy(m_EyeCameras[i].gameObject);
+                    DestroyObjectSafe(m_EyeCameras[i].gameObject);
                 if (m_EyeTextures[i] != null)
                 {
                     m_EyeTextures[i].Release();
-                    Destroy(m_EyeTextures[i]);
+                    DestroyObjectSafe(m_EyeTextures[i]);
                 }
-                if (m_Meshes[i] != null)
-                    Destroy(m_Meshes[i]);
-                if (m_Materials[i] != null)
-                    Destroy(m_Materials[i]);
+                DestroyObjectSafe(m_Meshes[i]);
+                DestroyObjectSafe(m_Materials[i]);
                 m_EyeCameras[i] = null;
                 m_EyeTextures[i] = null;
                 m_Meshes[i] = null;
                 m_Materials[i] = null;
             }
 
-            if (m_MarkerMesh != null)
-                Destroy(m_MarkerMesh);
-            if (m_MarkerMaterial != null)
-                Destroy(m_MarkerMaterial);
-            if (m_MarkerTexture != null)
-                Destroy(m_MarkerTexture);
+            DestroyObjectSafe(m_MarkerMesh);
+            DestroyObjectSafe(m_MarkerMaterial);
+            DestroyObjectSafe(m_MarkerTexture);
             m_MarkerMesh = null;
             m_MarkerMaterial = null;
             m_MarkerTexture = null;
 
+            DestroyObjectSafe(m_FullscreenBackdropObject);
+            DestroyObjectSafe(m_FullscreenBackdropMesh);
+            DestroyObjectSafe(m_FullscreenBackdropMaterial);
+            m_FullscreenBackdropObject = null;
+            m_FullscreenBackdropMesh = null;
+            m_FullscreenBackdropMaterial = null;
+
+            if (m_MonoBackdropCamera != null)
+            {
+                DestroyObjectSafe(m_MonoBackdropCamera.gameObject);
+                m_MonoBackdropCamera = null;
+            }
+
             if (m_Compositor != null)
-                Destroy(m_Compositor);
+                DestroyObjectSafe(m_Compositor);
             m_Compositor = null;
         }
     }

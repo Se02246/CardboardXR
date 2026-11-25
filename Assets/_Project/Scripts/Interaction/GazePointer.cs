@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using CardboardXR.Stereo;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.EventSystems;
@@ -39,6 +40,8 @@ namespace CardboardXR.Interaction
         bool m_ClickCancelled;
         bool m_TapOnScreenUi;
         float m_PressTime;
+        Vector3 m_PressedLocalHit;
+        bool m_HasPressedLocalHit;
 
         public UnityEvent OnHold => m_OnHold;
 
@@ -57,8 +60,38 @@ namespace CardboardXR.Interaction
 
         public GazeReticle Reticle => m_Reticle;
 
+        // Optional interceptor checked at the start of TriggerDown: return true to swallow the tap/click
+        // (used by WatchGrabController so a single tap releases a grabbed window without clicking underneath).
+        public static System.Func<bool> TriggerInterceptor { get; set; }
+
+        // Optional angular offset from the center of the head view, in degrees (x = yaw +right, y = pitch +up),
+        // steered by the Pixel Watch's gyroscope while connected. (0, 0) keeps the cursor centered.
+        public Vector2 CursorAnglesDeg { get; set; }
+
+        // Forces the gaze reticle & ray strictly to center forward (e.g. during VR SBS fullscreen mode).
+        public static bool LockCursorToCenter { get; set; }
+
+        // When true, skips physics colliders and spatial surfaces so only allowed overlay GazeCanvases interact.
+        public static bool OverlayCanvasesOnly { get; set; }
+
+        // Invoked on a gaze trigger click that landed on no UI target (used by VR SBS fullscreen for Cardboard taps).
+        public static System.Action OnEmptyTriggerClick { get; set; }
+
+        public Vector3 CursorLocalDirection =>
+            !LockCursorToCenter && CursorAnglesDeg.sqrMagnitude > 1e-6f
+                ? Quaternion.Euler(-CursorAnglesDeg.y, CursorAnglesDeg.x, 0f) * Vector3.forward
+                : Vector3.forward;
+
+        public Ray PointerRay =>
+            RayOverride ?? new Ray(transform.position, transform.TransformDirection(CursorLocalDirection));
+
         // A ray to point with instead of the head's forward line.
         public Ray? RayOverride { get; set; }
+
+        // Optional spatial surface provider override (for tests); defaults to SpatialSurfaceLocator.Active.
+        public ISpatialSurfaceProvider SpatialSurfaceOverride { get; set; }
+
+        ISpatialSurfaceProvider ActiveSpatialProvider => SpatialSurfaceOverride ?? SpatialSurfaceLocator.Active;
 
         PointerEventData EventData =>
             m_EventData ??= new PointerEventData(EventSystem.current) { button = PointerEventData.InputButton.Left };
@@ -67,6 +100,7 @@ namespace CardboardXR.Interaction
         {
             Release(click: false);
             SetTarget(null, default);
+            SpatialWindowAnchor.ClearActiveGaze();
         }
 
         void Update()
@@ -75,27 +109,31 @@ namespace CardboardXR.Interaction
             UpdateTrigger();
         }
 
-        // Finds what the head points at, sends enter and exit events when that changes, and moves the
+        // Finds what the pointer aims at, sends enter and exit events when that changes, and moves the
         // reticle onto it.
         public void UpdateGaze()
         {
-            var ray = RayOverride ?? new Ray(transform.position, transform.forward);
+            var localDir = CursorLocalDirection;
+            var ray = RayOverride ?? new Ray(transform.position, transform.TransformDirection(localDir));
             var found = Raycast(ray, out var result);
             SetTarget(found ? result.gameObject : null, result);
+            SpatialWindowAnchor.SetActiveGaze(ray, m_Target);
             TargetDistance = found ? result.distance : m_MaxDistance;
             if (m_Reticle == null)
                 return;
-            // The reticle sits on the head's forward line, so it hides while another ray points.
+            // The reticle follows the gaze/watch ray, and hides while a 6DoF hand ray overrides it.
             var showReticle = !RayOverride.HasValue;
             if (m_Reticle.gameObject.activeSelf != showReticle)
                 m_Reticle.gameObject.SetActive(showReticle);
-            m_Reticle.SetTarget(TargetDistance, IsInteractive(m_Target));
+            m_Reticle.SetTarget(TargetDistance, IsInteractive(m_Target), localDir);
         }
 
         // Presses the target, as the viewer's button touching the screen does.
         public void TriggerDown()
         {
             if (m_Held)
+                return;
+            if (TriggerInterceptor != null && TriggerInterceptor())
                 return;
 
             m_Held = true;
@@ -108,18 +146,44 @@ namespace CardboardXR.Interaction
             // Like the UI input modules: the press goes to the nearest down handler up the hierarchy,
             // or else to the click handler.
             m_Pressed = null;
+            m_HasPressedLocalHit = false;
             if (m_Target != null)
             {
                 m_Pressed = ExecuteEvents.ExecuteHierarchy(m_Target, eventData, ExecuteEvents.pointerDownHandler);
                 if (m_Pressed == null)
                     m_Pressed = ExecuteEvents.GetEventHandler<IPointerClickHandler>(m_Target);
+                if (m_Pressed != null)
+                {
+                    m_PressedLocalHit = m_Pressed.transform.InverseTransformPoint(eventData.pointerPressRaycast.worldPosition);
+                    m_HasPressedLocalHit = true;
+                }
             }
             eventData.pointerPress = m_Pressed;
             Debug.Log($"[Gaze] Pressed {(m_Target != null ? m_Target.name : "nothing")} {TargetDistance:F2} m away");
         }
 
-        // Releases the press, and clicks if the gaze is still on what was pressed.
+        const float k_QuickTapGraceSeconds = 0.35f;
+        const float k_QuickTapGraceMaxAngleDeg = 3.5f;
+
+        // Releases the press, and clicks if the gaze is still on what was pressed (or drifted slightly
+        // onto empty space between buttons during a quick tap).
         public void TriggerUp() => Release(click: true);
+
+        bool IsWithinQuickTapGrace(GameObject pressed)
+        {
+            if (pressed == null || !pressed.activeInHierarchy)
+                return false;
+            if (Time.unscaledTime - m_PressTime > k_QuickTapGraceSeconds)
+                return false;
+            if (!m_HasPressedLocalHit)
+                return false;
+            var ray = PointerRay;
+            var worldHit = pressed.transform.TransformPoint(m_PressedLocalHit);
+            var toHit = worldHit - ray.origin;
+            if (toHit.sqrMagnitude <= 1e-6f)
+                return true;
+            return Vector3.Angle(ray.direction, toHit) <= k_QuickTapGraceMaxAngleDeg;
+        }
 
         void Release(bool click)
         {
@@ -132,16 +196,30 @@ namespace CardboardXR.Interaction
                 ExecuteEvents.Execute(m_Pressed, eventData, ExecuteEvents.pointerUpHandler);
 
             var clickHandler = m_Target != null ? ExecuteEvents.GetEventHandler<IPointerClickHandler>(m_Target) : null;
-            if (click && !m_ClickCancelled && eventData.eligibleForClick && m_Pressed != null && m_Pressed == clickHandler)
+            if (click && !m_ClickCancelled && eventData.eligibleForClick && m_Pressed != null)
             {
-                ExecuteEvents.Execute(clickHandler, eventData, ExecuteEvents.pointerClickHandler);
-                Debug.Log($"[Gaze] Clicked {clickHandler.name}");
+                var targetClick = m_Pressed == clickHandler
+                    ? clickHandler
+                    : (clickHandler == null && IsWithinQuickTapGrace(m_Pressed)
+                        ? ExecuteEvents.GetEventHandler<IPointerClickHandler>(m_Pressed)
+                        : null);
+                if (targetClick != null)
+                {
+                    ExecuteEvents.Execute(targetClick, eventData, ExecuteEvents.pointerClickHandler);
+                    Debug.Log($"[Gaze] Clicked {targetClick.name}");
+                }
+            }
+            else if (click && !m_ClickCancelled && eventData.eligibleForClick &&
+                     m_Pressed == null && m_Target == null && OnEmptyTriggerClick != null)
+            {
+                OnEmptyTriggerClick.Invoke();
             }
 
             eventData.eligibleForClick = false;
             eventData.pointerPress = null;
             eventData.rawPointerPress = null;
             m_Pressed = null;
+            m_HasPressedLocalHit = false;
             // Pressing a Button selects it, which would keep it tinted after the gaze moves on.
             if (EventSystem.current != null)
                 EventSystem.current.SetSelectedGameObject(null);
@@ -179,9 +257,11 @@ namespace CardboardXR.Interaction
             result = default;
             // How far away a graphic can be and still be hit.
             var canvasReach = m_MaxDistance;
-            if (PhysicsRaycast(ray, out var hit))
+            var hitWasRealSurface = false;
+            if (!OverlayCanvasesOnly && PhysicsRaycast(ray, out var hit))
             {
-                if (!IsRealSurface(hit.collider))
+                hitWasRealSurface = IsRealSurface(hit.collider);
+                if (!hitWasRealSurface)
                     canvasReach = hit.distance;
                 result = new RaycastResult
                 {
@@ -198,6 +278,7 @@ namespace CardboardXR.Interaction
                 if (!canvases[i].Raycast(ray, canvasReach, out var graphic, out var distance))
                     continue;
                 canvasReach = distance;
+                hitWasRealSurface = false;
                 result = new RaycastResult
                 {
                     gameObject = graphic.gameObject,
@@ -205,6 +286,35 @@ namespace CardboardXR.Interaction
                     worldPosition = ray.GetPoint(distance),
                     worldNormal = -graphic.transform.forward,
                 };
+            }
+
+            var spatial = OverlayCanvasesOnly ? null : ActiveSpatialProvider;
+            if (spatial != null && spatial.IsPlacementActive)
+            {
+                if (result.gameObject == null || hitWasRealSurface)
+                {
+                    if (spatial.TryRaycast(ray, out var surfaceTarget, out var point, out var normal, out var distance))
+                    {
+                        result = new RaycastResult
+                        {
+                            gameObject = surfaceTarget,
+                            distance = distance,
+                            worldPosition = point,
+                            worldNormal = normal,
+                        };
+                        spatial.NotifyHitResult(true);
+                    }
+                    else
+                    {
+                        spatial.NotifyHitResult(false);
+                        if (hitWasRealSurface)
+                            result = default;
+                    }
+                }
+                else
+                {
+                    spatial.NotifyHitResult(false);
+                }
             }
 
             return result.gameObject != null;

@@ -121,8 +121,21 @@ namespace ProjectBootstrap
             foreach (var entry in catalog.Demos)
             {
                 if (!known.Contains(entry.Id))
-                    Debug.LogWarning($"[DemoScenes] The catalog's {entry.Id} has no DemoSetup; remove it from {CatalogPath} if its demo is gone");
+                    Debug.Log($"[DemoScenes] Pruning removed demo from catalog: {entry.Id}");
             }
+            var serialized = new SerializedObject(catalog);
+            var demos = serialized.FindProperty("m_Demos");
+            var removed = false;
+            for (var i = demos.arraySize - 1; i >= 0; i--)
+            {
+                var id = demos.GetArrayElementAtIndex(i).FindPropertyRelative("Id").stringValue;
+                if (known.Contains(id))
+                    continue;
+                demos.DeleteArrayElementAtIndex(i);
+                removed = true;
+            }
+            if (removed)
+                serialized.ApplyModifiedPropertiesWithoutUndo();
             return catalog;
         }
 
@@ -149,6 +162,7 @@ namespace ProjectBootstrap
             needs.FindPropertyRelative("Hands").enumValueIndex = (int)requirements.Hands;
             needs.FindPropertyRelative("ScanSurfaces").boolValue = requirements.ScanSurfaces;
             needs.FindPropertyRelative("KeepPlacedObjects").boolValue = requirements.KeepPlacedObjects;
+            needs.FindPropertyRelative("HandPinch").boolValue = requirements.HandPinch;
             serialized.ApplyModifiedPropertiesWithoutUndo();
             Debug.Log($"[DemoScenes] Added {source.Id} to the catalog");
         }

@@ -24,6 +24,10 @@ namespace CardboardXR.Demos
         public bool ScanSurfaces;
         // Leave objects the demo placed on surfaces when leaving it, instead of removing them.
         public bool KeepPlacedObjects;
+        // Keep the camera's pinch clicking even while the Pixel Watch app is connected, for a demo
+        // that needs to know where the hand pinched: painting in the air, picking things up. Elsewhere
+        // the watch's double pinch replaces it (PinchRouter.HandPinchMuted).
+        public bool HandPinch;
     }
 
     // The Core capabilities a demo can switch.

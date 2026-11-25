@@ -74,6 +74,8 @@ namespace CardboardXR.Stereo
         [SerializeField] float m_MaxScanSeconds = 60f;
         [Tooltip("Optional: with passthrough on the room can be seen, so surfaces don't warn.")]
         [SerializeField] PassthroughController m_Passthrough;
+        [Tooltip("Room plane scanning and '+' surface crosses overlay (disabled by default to save resources).")]
+        [SerializeField] bool m_RoomScanEnabled = false;
 
         bool m_WasSixDof;
         bool m_Scanning;
@@ -96,8 +98,11 @@ namespace CardboardXR.Stereo
 
         float m_NextFloorCheck;
         float m_LoggedFloor = float.NaN;
-        // The floor's height in session space, once found.
+        // The floor's height in session space, once found from planes or depth.
         float? m_Floor;
+        float? m_DepthFloor;
+        bool m_ShowManualScanGrid;
+        BoxCollider m_FloorSafetyCollider;
         int m_Checks;
         // The head's closest approach, across the room, to a surface above the floor since the last
         // status line, and that surface.
@@ -106,6 +111,24 @@ namespace CardboardXR.Stereo
 
         // Shows every surface's grid, however far away and at floor level too; for ArDebugView.
         public bool ShowAll { get; set; }
+        // Shown in the toolbar ONLY when inside an app that needs room surface scanning (e.g. Cube Sandbox).
+        public bool ShowScanButton { get; set; }
+        // True while SpatialSurfaceLocator is actively placing objects (keeps floor collider active).
+        public bool ContinuousPlacementActive { get; set; }
+
+        public bool RoomScanEnabled
+        {
+            get => m_RoomScanEnabled;
+            set => m_RoomScanEnabled = value;
+        }
+
+        public static bool ShouldRunPlaneDetection(bool sixDof, bool roomScanEnabled, bool scanning,
+            bool continuousPlacement, bool showAll) =>
+            sixDof && (showAll || (roomScanEnabled && (scanning || continuousPlacement)));
+
+        public static bool ShouldShowScanGrid(bool roomScanEnabled, bool showAll, bool scanning,
+            bool continuousPlacement, bool manualGrid) =>
+            showAll || (roomScanEnabled && scanning && (!continuousPlacement || manualGrid));
 
         // Whether a scan for surfaces is running.
         public bool IsScanning => m_Scanning;
@@ -114,15 +137,24 @@ namespace CardboardXR.Stereo
         // whether one is the floor.
         public int SurfaceCount => m_TrackedSurfaces;
         public float SurfaceArea => m_SurfaceArea;
-        public bool HasFloor => m_Floor.HasValue;
+        public bool HasFloor => m_Floor.HasValue || m_DepthFloor.HasValue;
+        public float? FloorSessionHeight => m_Floor ?? m_DepthFloor;
+        public float? FloorWorldHeight => FloorSessionHeight.HasValue && m_Fusion != null
+            ? m_Fusion.SessionToWorld.position.y + FloorSessionHeight.Value
+            : null;
 
-        // Whether hand tracking should pause, leaving the CPU to plane detection: at the start of a scan,
-        // for at most k_HandPauseSeconds of tracking. A floor scan with the floor never in view paused
-        // the hands for a whole minute, which looked like hand tracking failing.
-        public bool PausesHands => m_Scanning && m_ScanTime < k_HandPauseSeconds;
+        // Kept false so open-palm Home detection works immediately from second 0 (no 8s startup pause).
+        public bool PausesHands => false;
 
         // Whether a room scan (ScanRoom) has run its course since 6DoF began, so another isn't needed.
         public bool HasScannedRoom { get; private set; }
+
+        public void ObserveDepthFloor(float sessionHeight)
+        {
+            m_DepthFloor = sessionHeight;
+            if (!m_Floor.HasValue && m_Fusion != null)
+                m_Fusion.SetFloor(sessionHeight);
+        }
 
         void OnEnable()
         {
@@ -135,7 +167,18 @@ namespace CardboardXR.Stereo
             }
         }
 
-        void OnDisable() => Shader.SetGlobalFloat(k_RadiusId, 0f);
+        void OnDisable()
+        {
+            Shader.SetGlobalFloat(k_RadiusId, 0f);
+            if (m_FloorSafetyCollider != null)
+                m_FloorSafetyCollider.enabled = false;
+        }
+
+        void OnDestroy()
+        {
+            if (m_FloorSafetyCollider != null)
+                Destroy(m_FloorSafetyCollider.gameObject);
+        }
 
         void Update()
         {
@@ -143,21 +186,29 @@ namespace CardboardXR.Stereo
             if (sixDof != m_WasSixDof)
             {
                 m_WasSixDof = sixDof;
-                // Out of 6DoF the origin stops following ARCore, so the planes and their colliders
-                // are hidden until ARCore is back.
-                foreach (var plane in m_Planes.trackables)
-                    plane.gameObject.SetActive(sixDof);
+                if (m_Planes != null)
+                {
+                    // Hide planes unless scanning or AR debug is active.
+                    var visiblePlanes = ShouldRunPlaneDetection(sixDof, m_RoomScanEnabled, m_Scanning, ContinuousPlacementActive, ShowAll);
+                    foreach (var plane in m_Planes.trackables)
+                        plane.gameObject.SetActive(visiblePlanes);
+                }
                 if (!sixDof)
+                {
                     HasScannedRoom = false;
-                // The floor scan, unless a room scan was asked for as 6DoF started.
-                if (sixDof && !(m_Scanning && !m_StopWhenFloorFound))
+                    m_DepthFloor = null;
+                    m_ShowManualScanGrid = false;
+                }
+                // Only auto-start room plane scan on 6DoF entry if room scanning is enabled.
+                if (sixDof && m_RoomScanEnabled && !(m_Scanning && !m_StopWhenFloorFound))
                     StartScan(true);
             }
             UpdateScan(sixDof);
             if (m_ScanButton != null)
             {
-                if (m_ScanButton.gameObject.activeSelf != sixDof)
-                    m_ScanButton.gameObject.SetActive(sixDof);
+                var showScanBtn = sixDof && ShowScanButton && m_RoomScanEnabled;
+                if (m_ScanButton.gameObject.activeSelf != showScanBtn)
+                    m_ScanButton.gameObject.SetActive(showScanBtn);
                 if (m_ScanButton.Selected != m_Scanning)
                     m_ScanButton.Selected = m_Scanning;
             }
@@ -166,6 +217,7 @@ namespace CardboardXR.Stereo
                 m_ScanShown = 0f;
                 Shader.SetGlobalFloat(k_RadiusId, 0f);
                 Shader.SetGlobalFloat(k_ScanId, 0f);
+                UpdateFloorSafetyCollider(false, null);
                 return;
             }
 
@@ -174,15 +226,20 @@ namespace CardboardXR.Stereo
             var head = m_Fusion.transform.position;
             Shader.SetGlobalVector(k_HeadId, head);
             Shader.SetGlobalMatrix(k_WorldToSessionId, transform.worldToLocalMatrix);
-            // While scanning, every surface shows, so the user can see what's been found: revealed by
-            // the wave, which only spreads while tracking, since nothing is found before.
-            var showScan = ShowAll || m_Scanning;
-            m_ScanShown = Mathf.MoveTowards(m_ScanShown, showScan ? 1f : 0f,
-                Time.unscaledDeltaTime / (showScan ? k_ShowSeconds : k_HideSeconds));
+            // Disabled by default: eliminates the '+' crosses shader wave and ARPlane detection overhead.
+            var showScan = ShouldShowScanGrid(m_RoomScanEnabled, ShowAll, m_Scanning, ContinuousPlacementActive, m_ShowManualScanGrid);
+            m_ScanShown = showScan || m_ScanShown > 0.001f
+                ? Mathf.MoveTowards(m_ScanShown, showScan ? 1f : 0f,
+                    Time.unscaledDeltaTime / (showScan ? k_ShowSeconds : k_HideSeconds))
+                : 0f;
             Shader.SetGlobalFloat(k_ScanId, Mathf.SmoothStep(0f, 1f, m_ScanShown));
             Shader.SetGlobalVector(k_WaveId, new Vector4(m_WaveOrigin.x, m_WaveOrigin.y, m_WaveOrigin.z,
                 ShowAll ? 1000f : m_ScanTime * k_WaveSpeed));
-            if (!m_WarnWhenNear || (m_Passthrough != null && m_Passthrough.IsOn))
+            var floorSessionHeight = FloorSessionHeight;
+            var floorWorldHeight = floorSessionHeight.HasValue ? sessionToWorld.position.y + floorSessionHeight.Value : (float?)null;
+            var needSafetyFloor = ContinuousPlacementActive || (AnchorPlacer.Instance != null && AnchorPlacer.Instance.HasDynamicObjects);
+            UpdateFloorSafetyCollider(needSafetyFloor, floorWorldHeight ?? (head.y - 1.45f));
+            if ((!m_RoomScanEnabled && !ShowAll) || !m_WarnWhenNear || (m_Passthrough != null && m_Passthrough.IsOn))
             {
                 // Otherwise only scans and the surface pointed at show.
                 Shader.SetGlobalFloat(k_RadiusId, 0f);
@@ -193,19 +250,47 @@ namespace CardboardXR.Stereo
                 // The session-to-world rotation is a turn about the vertical, so heights just
                 // shift. Until the floor is found, assume it's as deep as the shallowest floor
                 // PickFloor takes.
-                Shader.SetGlobalFloat(k_FloorId, m_Floor.HasValue ? sessionToWorld.position.y + m_Floor.Value : head.y - m_MinFloorDepth);
+                Shader.SetGlobalFloat(k_FloorId, floorWorldHeight ?? head.y - m_MinFloorDepth);
             }
 
-            if (Time.unscaledTime < m_NextFloorCheck)
+            if ((!m_RoomScanEnabled && !ShowAll) || Time.unscaledTime < m_NextFloorCheck)
                 return;
             m_NextFloorCheck = Time.unscaledTime + k_FloorCheckSeconds;
             UpdateFloor();
+        }
+
+        void UpdateFloorSafetyCollider(bool active, float? floorWorldY)
+        {
+            if (!active || !floorWorldY.HasValue)
+            {
+                if (m_FloorSafetyCollider != null && m_FloorSafetyCollider.enabled)
+                    m_FloorSafetyCollider.enabled = false;
+                return;
+            }
+
+            if (m_FloorSafetyCollider == null)
+            {
+                var go = new GameObject("Floor Safety Collider");
+                go.layer = 2; // Ignore Raycast: catches falling/thrown cubes without blocking gaze or hand rays.
+                m_FloorSafetyCollider = go.AddComponent<BoxCollider>();
+                m_FloorSafetyCollider.size = new Vector3(24f, 0.4f, 24f);
+            }
+
+            if (!m_FloorSafetyCollider.enabled)
+                m_FloorSafetyCollider.enabled = true;
+
+            var headPos = m_Fusion != null ? m_Fusion.transform.position : Vector3.zero;
+            m_FloorSafetyCollider.transform.SetPositionAndRotation(
+                new Vector3(headPos.x, floorWorldY.Value - 0.2f, headPos.z),
+                Quaternion.identity);
         }
 
         // A room scan: finds surfaces until nothing new turns up, not just the floor. Turns a floor
         // scan that's running into one; asked for before 6DoF starts, it runs once it does.
         public void ScanRoom()
         {
+            if (!m_RoomScanEnabled && !ShowAll)
+                return;
             if (m_Scanning && !m_StopWhenFloorFound)
                 return;
             if (m_Scanning)
@@ -220,10 +305,17 @@ namespace CardboardXR.Stereo
         // The settings panel's Scan Room: a room scan, or the end of the one running.
         public void ToggleScan()
         {
+            if (!m_RoomScanEnabled && !ShowAll)
+                return;
             if (m_Scanning)
+            {
                 FinishScan();
+            }
             else
+            {
+                m_ShowManualScanGrid = true;
                 ScanRoom();
+            }
         }
 
         // Ends a scan now, as the lobby's Skip does.
@@ -249,6 +341,7 @@ namespace CardboardXR.Stereo
         void StopScan(string how)
         {
             m_Scanning = false;
+            m_ShowManualScanGrid = false;
             // Ended early still counts once the floor's in: that's the lobby's Done.
             if (!m_StopWhenFloorFound && (how != "ended early" || m_Floor.HasValue))
                 HasScannedRoom = true;
@@ -280,9 +373,20 @@ namespace CardboardXR.Stereo
                 else if (m_ScanTime >= m_MaxScanSeconds)
                     StopScan("gave up");
             }
-            var detecting = sixDof && m_Scanning;
-            if (m_Planes.enabled != detecting)
-                m_Planes.enabled = detecting;
+            var detecting = ShouldRunPlaneDetection(sixDof, m_RoomScanEnabled, m_Scanning, ContinuousPlacementActive, ShowAll);
+            if (m_Planes != null)
+            {
+                if (m_Planes.enabled != detecting)
+                    m_Planes.enabled = detecting;
+                if (!detecting)
+                {
+                    foreach (var plane in m_Planes.trackables)
+                    {
+                        if (plane != null && plane.gameObject.activeSelf)
+                            plane.gameObject.SetActive(false);
+                    }
+                }
+            }
         }
 
         void UpdateFloor()

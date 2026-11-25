@@ -31,15 +31,15 @@ namespace CardboardXR.Hands
         [SerializeField] Transform m_Eyes;
         // From the pinch study: fingertips about 2-3 cm apart pinched and 9.5-10.4 cm open.
         [Tooltip("Fingertips closer than this, in meters, start a pinch.")]
-        [SerializeField] float m_PinchDistance = 0.05f;
+        [SerializeField] float m_PinchDistance = 0.042f;
         [Tooltip("Fingertips farther apart than this, in meters, end a pinch.")]
-        [SerializeField] float m_ReleaseDistance = 0.07f;
+        [SerializeField] float m_ReleaseDistance = 0.060f;
         [Tooltip("Fingertips at least this far apart, in meters, give a pinch value of 0.")]
-        [SerializeField] float m_OpenDistance = 0.09f;
+        [SerializeField] float m_OpenDistance = 0.085f;
         [Tooltip("Fingertips this far apart in the image, over the palm's width there, end a pinch " +
-                 "whatever the hand's 3D shape says. The pinch study measured about 0.23 pinched and " +
+                 "once the hand's 3D shape has collapsed. The pinch study measured about 0.23 pinched and " +
                  "1.8 to 2.1 open.")]
-        [SerializeField] float m_OpenRatio = 1f;
+        [SerializeField] float m_OpenRatio = 0.80f;
 
         // Frames where the image gap read open while the fitting 3D shape held the pinch, for the
         // status line.
@@ -56,11 +56,14 @@ namespace CardboardXR.Hands
         // leaving the camera's view, where most losses happen (0-10% from the edge in the logs; false
         // opens read at most 2%, so 3% holds back few real releases).
         const int k_OpenResults = 2;
-        // Longer than HandInteractorRig's m_LostSeconds (0.25 s).
-        const float k_PinchKeptSeconds = 0.3f;
+        const int k_CloseResults = 1;
+        // Shorter grace avoids keeping a pinch latched across brief loss/re-acquisition cycles.
+        const float k_PinchKeptSeconds = 0.18f;
         float m_LostSince = -1f;
         const float k_EdgeMargin = 0.03f;
         int m_OpenResults;
+        int m_CloseResults;
+        bool m_SeenOpen;
         int m_PinchResult = -1;
         bool m_LoggedEdge;
         // Whether a pinch was held back during this turn, to log it once.
@@ -139,6 +142,8 @@ namespace CardboardXR.Hands
             if (CardboardHandProvider.Feed == this)
                 CardboardHandProvider.Feed = null;
             m_HasHand = false;
+            m_SeenOpen = false;
+            m_CloseResults = 0;
         }
 
         void OnDestroy()
@@ -161,7 +166,11 @@ namespace CardboardXR.Hands
                 if (m_LostSince < 0f)
                     m_LostSince = Time.unscaledTime;
                 if (Time.unscaledTime - m_LostSince > k_PinchKeptSeconds)
+                {
                     m_Pinch.Reset();
+                    m_SeenOpen = false;
+                }
+                m_CloseResults = 0;
                 m_Turn.Reset();
                 return;
             }
@@ -200,17 +209,56 @@ namespace CardboardXR.Hands
             if (!m_Pinch.IsPinched)
             {
                 m_OpenResults = 0;
-                if (!m_Tracker.ShapeFits)
+                var clearlyOpen = (m_Tracker.ShapeFits && m_Tracker.PinchDistance >= m_ReleaseDistance) ||
+                                  (!m_Tracker.ShapeFits && m_Tracker.PinchRatio >= m_OpenRatio);
+                if (clearlyOpen)
+                {
+                    m_SeenOpen = true;
+                    m_CloseResults = 0;
+                    m_Pinch.Update(m_OpenDistance);
+                    if (!m_Turn.IsTurning)
+                        m_LoggedTurn = false;
                     return;
+                }
+
+                if (!m_SeenOpen)
+                    return;
+
+                if (!m_Tracker.ShapeFits)
+                {
+                    if (!m_Turn.IsTurning && m_Tracker.PinchRatio < 0.36f)
+                    {
+                        if (newResult && ++m_CloseResults >= k_CloseResults)
+                        {
+                            m_Pinch.Update(m_PinchDistance * 0.5f);
+                            m_CloseResults = 0;
+                        }
+                    }
+                    else if (newResult)
+                    {
+                        m_CloseResults = 0;
+                    }
+                    return;
+                }
                 var wouldClose = m_Tracker.PinchDistance < m_PinchDistance;
                 if (wouldClose && m_Turn.IsTurning)
                 {
                     if (!m_LoggedTurn)
                         Debug.Log($"[Hands] Fingertips {m_Tracker.PinchDistance * 100f:F1} cm apart while the hand turned over; not a pinch");
                     m_LoggedTurn = true;
+                    m_CloseResults = 0;
+                }
+                else if (wouldClose)
+                {
+                    if (newResult && ++m_CloseResults >= k_CloseResults)
+                    {
+                        m_Pinch.Update(m_Tracker.PinchDistance);
+                        m_CloseResults = 0;
+                    }
                 }
                 else
                 {
+                    m_CloseResults = 0;
                     m_Pinch.Update(m_Tracker.PinchDistance);
                 }
                 if (!m_Turn.IsTurning)
@@ -218,8 +266,7 @@ namespace CardboardXR.Hands
                 return;
             }
 
-            // Pinched: whether this result says the fingers have opened, by the 3D shape while it fits,
-            // by the image's gap once it has collapsed.
+            // Pinched: while the 3D shape still fits, it decides; once it collapses, the image gap decides.
             var opens = m_Tracker.ShapeFits ? m_Tracker.PinchDistance > m_ReleaseDistance : m_Tracker.PinchRatio > m_OpenRatio;
             if (m_Tracker.ShapeFits && !opens && m_Tracker.PinchRatio > m_OpenRatio)
                 m_IgnoredOpens++;
@@ -232,10 +279,9 @@ namespace CardboardXR.Hands
             if (!newResult)
                 return;
             // Near the image's edge the fingers are often partly out of view, and read open as the hand
-            // leaves it: that's a hand being lost, not let go, so the pinch holds. Either the hand comes
-            // back into view or it's lost (and what it held stays where it was: CubePhysics).
+            // leaves it: hold only marginal opens at the edge, never clear separations.
             var edge = m_Tracker.EdgeDistance;
-            if (edge < k_EdgeMargin)
+            if (edge < k_EdgeMargin && m_Tracker.PinchRatio <= m_OpenRatio + 0.22f)
             {
                 if (!m_LoggedEdge)
                     Debug.Log($"[Hands] Fingers read open {edge * 100f:F0}% from the image's edge; holding the pinch");
@@ -243,12 +289,12 @@ namespace CardboardXR.Hands
                 m_OpenResults = 0;
                 return;
             }
-            // And only once it lasts: a single result can be a glitch.
-            if (++m_OpenResults < k_OpenResults)
+            var clearlySeparated = (m_Tracker.ShapeFits && m_Tracker.PinchDistance > m_ReleaseDistance + 0.015f) ||
+                                   (!m_Tracker.ShapeFits && m_Tracker.PinchRatio > m_OpenRatio + 0.4f);
+            if (!clearlySeparated && ++m_OpenResults < k_OpenResults)
                 return;
             if (!m_Tracker.ShapeFits)
-                Debug.Log($"[Hands] Fingers opened to {m_Tracker.PinchRatio:F2} of the palm's width; ending the pinch, " +
-                          "whose 3D shape had collapsed");
+                Debug.Log($"[Hands] Fingers opened to {m_Tracker.PinchRatio:F2} of the palm's width; ending the pinch");
             m_Pinch.Reset();
             m_OpenResults = 0;
         }

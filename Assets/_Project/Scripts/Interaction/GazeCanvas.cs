@@ -12,7 +12,7 @@ namespace CardboardXR.Interaction
     public class GazeCanvas : MonoBehaviour
     {
         // Graphics this close along the ray count as one plane and are ordered by drawing order.
-        const float k_SamePlaneDistance = 0.0001f;
+        const float k_SamePlaneDistance = 0.001f;
 
         static readonly List<GazeCanvas> s_Active = new();
         static readonly List<CanvasGroup> s_Groups = new();
@@ -20,6 +20,10 @@ namespace CardboardXR.Interaction
         Canvas m_Canvas;
 
         public static IReadOnlyList<GazeCanvas> Active => s_Active;
+
+        // Layer bitmask of canvases allowed to receive gaze raycasts (~0 = all layers;
+        // restricted to FullscreenOverlayLayer during fullscreen SBS phone-app mode).
+        public static int AllowedLayerMask { get; set; } = ~0;
 
         void OnEnable()
         {
@@ -36,6 +40,10 @@ namespace CardboardXR.Interaction
         {
             hit = null;
             hitDistance = maxDistance;
+            if (m_Canvas == null || !m_Canvas.isActiveAndEnabled)
+                return false;
+            if ((AllowedLayerMask & (1 << gameObject.layer)) == 0)
+                return false;
             var graphics = GraphicRegistry.GetRaycastableGraphicsForCanvas(m_Canvas);
             for (var i = 0; i < graphics.Count; i++)
             {

@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.XR.ARFoundation;
+using UnityEngine.XR.ARSubsystems;
 
 namespace CardboardXR.Stereo
 {
@@ -16,7 +17,7 @@ namespace CardboardXR.Stereo
         const float k_Thickness = 0.01f;
 
         [Tooltip("Planes smaller than this, in square meters, are left out.")]
-        [SerializeField] float m_MinArea = 0.2f;
+        [SerializeField] float m_MinArea = 0.04f;
 
         ARPlane m_Plane;
         BoxCollider m_Box;
@@ -38,7 +39,8 @@ namespace CardboardXR.Stereo
         void Fit()
         {
             var size = m_Plane.size;
-            var usable = size.x * size.y >= m_MinArea;
+            var isVertical = m_Plane.alignment == PlaneAlignment.Vertical;
+            var usable = !isVertical && size.x * size.y >= m_MinArea;
             // The mesh shows only while it's enabled, and stops rebuilding while it isn't; enabled
             // again, it rebuilds.
             if (m_Visualizer != null && m_Visualizer.enabled != usable)

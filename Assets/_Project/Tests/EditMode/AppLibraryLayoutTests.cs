@@ -64,5 +64,45 @@ namespace CardboardXR.Stereo.Tests
             Assert.AreEqual(1, AppLibrary.PageOf(3, rows: 1));
             Assert.Less(AppLibrary.Size(6, rows: 1).y, AppLibrary.Size(6).y);
         }
+
+        [Test]
+        public void HoneycombAppsGrid_Uses454FormationAndPaginatesCleanly()
+        {
+            Assert.AreEqual(1, AppLibrary.HoneycombPages(13));
+            Assert.AreEqual(2, AppLibrary.HoneycombPages(14));
+            Assert.AreEqual(0, AppLibrary.HoneycombPageOf(12));
+            Assert.AreEqual(1, AppLibrary.HoneycombPageOf(13));
+
+            var size13 = AppLibrary.HoneycombSize(13);
+            var positions = new Vector2[13];
+            for (var i = 0; i < 13; i++)
+            {
+                positions[i] = AppLibrary.HoneycombCellPosition(i, 13);
+                Assert.LessOrEqual(Mathf.Abs(positions[i].x) + AppLibrary.k_CellWidth * 0.5f,
+                    size13.x * 0.5f - 15.9f, $"App {i} overflowed horizontally");
+                Assert.LessOrEqual(positions[i].y + AppLibrary.k_CellHeight * 0.5f,
+                    size13.y * 0.5f - 15.9f, $"App {i} overflowed top");
+                Assert.Greater(positions[i].y - AppLibrary.k_CellHeight * 0.5f,
+                    AppLibrary.TaglinePosition(size13).y, $"App {i} overlapped tagline");
+            }
+
+            // Middle row center tile (index 6 in 4-5-4) is horizontally centered at x = 0.
+            Assert.AreEqual(0f, positions[6].x, 1e-4f);
+            // Row 0 has 4 tiles (same y), Row 1 has 5 tiles (same y), Row 2 has 4 tiles (same y).
+            Assert.AreEqual(positions[0].y, positions[3].y, 1e-4f);
+            Assert.Greater(positions[0].y, positions[4].y);
+            Assert.AreEqual(positions[4].y, positions[8].y, 1e-4f);
+            Assert.Greater(positions[4].y, positions[9].y);
+            Assert.AreEqual(positions[9].y, positions[12].y, 1e-4f);
+
+            // Multi-page honeycomb keeps cells clear of side arrows.
+            var size14 = AppLibrary.HoneycombSize(14);
+            var inner14 = size14.x * 0.5f - 16f - (56f + 8f);
+            for (var i = 0; i < 14; i++)
+            {
+                var pos = AppLibrary.HoneycombCellPosition(i, 14);
+                Assert.LessOrEqual(Mathf.Abs(pos.x) + AppLibrary.k_CellWidth * 0.5f, inner14 + 1e-3f);
+            }
+        }
     }
 }

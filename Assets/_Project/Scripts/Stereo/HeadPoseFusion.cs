@@ -45,7 +45,7 @@ namespace CardboardXR.Stereo
 
         [SerializeField] GyroHeadTracker m_Tracker;
         [SerializeField] ArPoseSource m_ArPose;
-        [SerializeField] Mode m_Mode = Mode.ThreeDof;
+        [SerializeField] Mode m_Mode = Mode.SixDof;
         [Tooltip("The eyes' midpoint relative to the AR camera, in head axes (x right, y up, z forward). " +
                  "The default estimates a Pixel 9 Pro in a Cardboard viewer.")]
         [SerializeField] Vector3 m_CameraToEyes = new(0.062f, -0.02f, -0.066f);
@@ -140,13 +140,29 @@ namespace CardboardXR.Stereo
 
         Quaternion Correction => m_Yaw.IsInitialized ? ToQuaternion(m_Yaw.Correction) : m_HeldCorrection;
 
+        // Head orientation in world space at a camera frame's capture timestamp, in the exact
+        // recentered + yaw-aligned frame used by UpdatePose().
+        public bool TryGetWorldRotationAt(long cameraTimestampNs, out Quaternion worldRotation)
+        {
+            worldRotation = transform.rotation;
+            if (cameraTimestampNs == 0 || m_Tracker == null)
+                return false;
+            if (!m_CameraClock.TryToTrackerClock(cameraTimestampNs, m_Tracker.NowNs, CameraClock.SystemNowNs(), out var trackerNs))
+                return false;
+            if (!m_Tracker.TryGetRotationAt(trackerNs, out var trackedThen))
+                return false;
+            worldRotation = m_RecenterRotation * Correction * trackedThen;
+            return true;
+        }
+
         void OnEnable()
         {
             m_Tracker.LinearAccelerationSampled += OnLinearAcceleration;
             Application.onBeforeRender += UpdatePose;
             m_StatsStart = Time.unscaledTime;
             m_UseAccelerometer = LaunchOptions.GetInt("imuPosition", 1) != 0;
-            var sixDof = LaunchOptions.GetInt("dof", m_Mode == Mode.SixDof ? 6 : 3) == 6;
+            var defaultDof = PlayerPrefs.GetInt("CardboardXR.UltrawideV2", 1) != 0 ? 3 : (m_Mode == Mode.SixDof ? 6 : 3);
+            var sixDof = LaunchOptions.GetInt("dof", defaultDof) == 6;
             SetMode(sixDof ? Mode.SixDof : Mode.ThreeDof, force: true);
         }
 

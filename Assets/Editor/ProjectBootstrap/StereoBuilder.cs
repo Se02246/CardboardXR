@@ -41,9 +41,12 @@ namespace ProjectBootstrap
         const string XcodeProject = "Builds/iOS";
         const string DistortionShaderPath = "Assets/_Project/Shaders/Distortion.shader";
         const string ReticleShaderPath = "Assets/_Project/Shaders/Reticle.shader";
+        const string PlacementReticleShaderPath = "Assets/_Project/Shaders/PlacementReticle.shader";
         const string BoundaryShaderPath = "Assets/_Project/Shaders/Boundary.shader";
         const string PassthroughShaderPath = "Assets/_Project/Shaders/Passthrough.shader";
         const string ShadowCatcherShaderPath = "Assets/_Project/Shaders/ShadowCatcher.shader";
+        const string EnvironmentDomeShaderPath = "Assets/_Project/Shaders/EnvironmentDome.shader";
+        const string HandSilhouetteShaderPath = "Assets/_Project/Shaders/HandSilhouette.shader";
         const string LitShaderName = "Universal Render Pipeline/Simple Lit";
         // Shadows only matter near the user, on the surfaces in reach; a short distance keeps the
         // shadow map's texels small.
@@ -72,6 +75,16 @@ namespace ProjectBootstrap
             BuildAndExit(BuildScenes(), XcodeProject, BuildTarget.iOS);
         }
 
+        // Regenerates Core.unity and generated prefabs/materials in batchmode without an APK build.
+        // Invoke with: -buildTarget Android -executeMethod ProjectBootstrap.StereoBuilder.RebuildScenes
+        public static void RebuildScenes()
+        {
+            BuildScenes();
+            AssetDatabase.SaveAssets();
+            Debug.Log("[StereoBuilder] Core scene and generated assets rebuilt.");
+            EditorApplication.Exit(0);
+        }
+
         // A release build unless CARDBOARDXR_DEVELOPMENT=1: a development build is debuggable on
         // Android and lets the Unity Profiler connect over the local network. CARDBOARDXR_BUNDLE_ID
         // builds under another app id, since an iOS bundle id belongs to the Apple team that first
@@ -86,20 +99,32 @@ namespace ProjectBootstrap
                 Debug.Log($"[Build] App id {bundleId.Trim()}");
             }
             var development = System.Environment.GetEnvironmentVariable("CARDBOARDXR_DEVELOPMENT") == "1";
+            var fast = System.Environment.GetEnvironmentVariable("CARDBOARDXR_FAST") == "1";
             var version = PlayerSettings.bundleVersion;
             var versionCode = PlayerSettings.Android.bundleVersionCode;
+            var namedTarget = NamedBuildTarget.FromBuildTargetGroup(BuildPipeline.GetBuildTargetGroup(target));
+            var prevCodeGen = PlayerSettings.GetIl2CppCodeGeneration(namedTarget);
             if (!ApplyRelease(target))
             {
                 EditorApplication.Exit(1);
                 return;
             }
+            if (fast)
+                PlayerSettings.SetIl2CppCodeGeneration(namedTarget, Il2CppCodeGeneration.OptimizeSize);
+            var buildOptions = BuildOptions.None;
+            if (development || fast)
+                buildOptions |= BuildOptions.Development;
+            if (fast)
+                buildOptions |= BuildOptions.CompressWithLz4;
             var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
             {
                 scenes = scenePaths,
                 locationPathName = outputPath,
                 target = target,
-                options = development ? BuildOptions.Development : BuildOptions.None,
+                options = buildOptions,
             });
+            if (fast)
+                PlayerSettings.SetIl2CppCodeGeneration(namedTarget, prevCodeGen);
             // Not left in ProjectSettings, so local builds go back to Unity's debug key.
             PlayerSettings.bundleVersion = version;
             PlayerSettings.Android.bundleVersionCode = versionCode;
@@ -158,7 +183,39 @@ namespace ProjectBootstrap
         // Core first, since it's the scene the app starts in, then the lobby and the demos.
         internal static string[] BuildScenes()
         {
+            var fast = System.Environment.GetEnvironmentVariable("CARDBOARDXR_FAST") == "1";
+            var rebuildScenes = System.Environment.GetEnvironmentVariable("CARDBOARDXR_REBUILD_SCENES") == "1";
+            if (fast && !rebuildScenes && System.IO.File.Exists(CoreScene))
+            {
+                var existingCatalog = AssetDatabase.LoadAssetAtPath<DemoCatalog>(DemoScenes.CatalogPath);
+                if (existingCatalog != null && !string.IsNullOrEmpty(existingCatalog.LobbyScenePath) &&
+                    System.IO.File.Exists(existingCatalog.LobbyScenePath))
+                {
+                    var allExist = true;
+                    var cached = new System.Collections.Generic.List<string> { CoreScene, existingCatalog.LobbyScenePath };
+                    foreach (var demo in existingCatalog.Demos)
+                    {
+                        if (string.IsNullOrEmpty(demo.ScenePath) || !System.IO.File.Exists(demo.ScenePath))
+                        {
+                            allExist = false;
+                            break;
+                        }
+                        cached.Add(demo.ScenePath);
+                    }
+                    if (allExist)
+                    {
+                        Debug.Log($"[StereoBuilder] Fast build: reusing {cached.Count} existing scenes (skipping scene rebuild)");
+                        return cached.ToArray();
+                    }
+                }
+            }
+
             MaterialAssets.Ensure();
+            if (AssetDatabase.IsValidFolder("Assets/_Project/Resources/Environments"))
+            {
+                AssetDatabase.ImportAsset("Assets/_Project/Resources/Environments",
+                    ImportAssetOptions.ImportRecursive | ImportAssetOptions.ForceUpdate);
+            }
             if (!DemoScenes.EnsureAll())
             {
                 Debug.LogError("[StereoBuilder] A demo's setup is wrong (see the [DemoScenes] errors above).");
@@ -182,8 +239,11 @@ namespace ProjectBootstrap
             // Load assets after NewScene: opening a scene in Single mode unloads assets loaded before it.
             var distortionShader = AssetDatabase.LoadAssetAtPath<Shader>(DistortionShaderPath);
             var reticleShader = AssetDatabase.LoadAssetAtPath<Shader>(ReticleShaderPath);
+            var placementReticleShader = AssetDatabase.LoadAssetAtPath<Shader>(PlacementReticleShaderPath);
             var boundaryShader = AssetDatabase.LoadAssetAtPath<Shader>(BoundaryShaderPath);
             var passthroughShader = AssetDatabase.LoadAssetAtPath<Shader>(PassthroughShaderPath);
+            var environmentDomeShader = AssetDatabase.LoadAssetAtPath<Shader>(EnvironmentDomeShaderPath);
+            var handSilhouetteShader = AssetDatabase.LoadAssetAtPath<Shader>(HandSilhouetteShaderPath);
             var unlit = Shader.Find(UnlitShaderName);
             var catalog = AssetDatabase.LoadAssetAtPath<DemoCatalog>(DemoScenes.CatalogPath);
             if (catalog == null)
@@ -192,10 +252,12 @@ namespace ProjectBootstrap
                 EditorApplication.Exit(1);
                 return null;
             }
-            if (distortionShader == null || reticleShader == null || boundaryShader == null || passthroughShader == null || unlit == null)
+            if (distortionShader == null || reticleShader == null || placementReticleShader == null || boundaryShader == null ||
+                passthroughShader == null || environmentDomeShader == null || handSilhouetteShader == null || unlit == null)
             {
                 Debug.LogError($"[StereoBuilder] Missing shader: {DistortionShaderPath}, {ReticleShaderPath}, " +
-                               $"{BoundaryShaderPath}, {PassthroughShaderPath} or {UnlitShaderName}.");
+                               $"{PlacementReticleShaderPath}, {BoundaryShaderPath}, {PassthroughShaderPath}, {EnvironmentDomeShaderPath}, " +
+                               $"{HandSilhouetteShaderPath} or {UnlitShaderName}.");
                 EditorApplication.Exit(1);
                 return null;
             }
@@ -214,35 +276,47 @@ namespace ProjectBootstrap
             var (poseSource, origin, arCamera, arViewOnly) = BuildViewerSetup(rig);
             var fusion = head.AddComponent<HeadPoseFusion>();
             var passthrough = origin.AddComponent<PassthroughController>();
+            var environment = origin.AddComponent<EnvironmentManager>();
+            var torch = origin.AddComponent<TorchManager>();
+            origin.AddComponent<SystemBridge>();
             var demosObject = new GameObject("Demos");
             var demos = demosObject.AddComponent<DemoManager>();
-            var (toolbar, panel) = BuildToolbar(fusion, passthrough, demos);
-            var modeToggle = toolbar[2];
-            var passthroughToggle = toolbar[3];
+            var onboarding = demosObject.AddComponent<ShizukuOnboardingController>();
+            var mediaWindow = demosObject.AddComponent<MediaControllerWindow>();
+            var notifOverlay = demosObject.AddComponent<NotificationOverlayController>();
+            var notifCenter = demosObject.AddComponent<NotificationCenterWindow>();
+            var (toolbar, panel, clockSlot, clockText, batteryText, notifBadge, notifBadgeText) =
+                BuildToolbar(environment, torch, demos, mediaWindow, notifCenter);
+            var envToggle = toolbar[1];
+            var envNext = toolbar[3];
+            var torchToggle = toolbar[4];
             var serializedFusion = new SerializedObject(fusion);
             serializedFusion.FindProperty("m_Tracker").objectReferenceValue = tracker;
             serializedFusion.FindProperty("m_ArPose").objectReferenceValue = poseSource;
-            serializedFusion.FindProperty("m_ModeToggle").objectReferenceValue = modeToggle;
             serializedFusion.ApplyModifiedPropertiesWithoutUndo();
             BuildGaze(head, fusion, reticleShader);
             BuildFade(head, demos);
             var boundary = BuildRoomBoundary(origin, fusion, boundaryShader);
-            // Shown in 6DoF only (RoomBoundary), where there's AR to scan with.
+            // Shown only inside apps that actually use surface scanning (e.g. Cube Sandbox).
             var scanButton = ToolbarItem(panel, "Scan", "radar", "Scan Room", boundary.ToggleScan);
-            toolbar[4] = scanButton;
+            toolbar[2] = scanButton;
             var serializedBoundary = new SerializedObject(boundary);
             serializedBoundary.FindProperty("m_ScanButton").objectReferenceValue = scanButton;
             serializedBoundary.FindProperty("m_Passthrough").objectReferenceValue = passthrough;
             serializedBoundary.ApplyModifiedPropertiesWithoutUndo();
             BuildAnchors(origin, fusion, unlit);
-            BuildHands(origin, fusion, poseSource, arCamera, passthrough, unlit);
-            ArrangeToolbar(panel, toolbar);
-            var settings = BuildSettings(origin, fusion, panel);
-            BuildLibrary(panel, demos, settings, toolbar[0], catalog);
+            BuildSpatialLocator(origin, fusion, boundary, arCamera, placementReticleShader);
+            BuildHands(origin, fusion, poseSource, arCamera, passthrough, unlit, handSilhouetteShader);
+            ArrangeToolbar(panel, clockSlot, toolbar);
+            var settings = BuildSettings(origin, fusion, panel, clockText, batteryText, toolbar[6], toolbar[7], notifBadge, notifBadgeText);
+            BuildLibrary(panel, demos, settings, toolbar[0], toolbar[5], catalog);
             BuildArDebugView(origin, rig, fusion, boundary, arCamera, arViewOnly);
-            BuildPassthrough(passthrough, fusion, rig, arCamera, passthroughToggle, passthroughShader);
+            BuildPassthrough(passthrough, fusion, rig, arCamera, null, passthroughShader);
+            BuildEnvironment(environment, fusion, passthrough, envToggle, envNext, environmentDomeShader);
+            BuildTorch(torch, passthrough, torchToggle);
             BuildLighting(origin, fusion, passthrough, arCamera);
-            BuildDemos(demosObject, demos, catalog, fusion, rig, passthrough, boundary, origin, settings);
+            BuildDemos(demosObject, demos, catalog, fusion, rig, passthrough, boundary, origin, settings,
+                onboarding, mediaWindow, notifOverlay, notifCenter);
 
             EditorSceneManager.SaveScene(scene, CoreScene);
             return catalog;
@@ -325,7 +399,9 @@ namespace ProjectBootstrap
 
         // What the lobby and demo scenes reach Core through, and what loads them.
         static void BuildDemos(GameObject demosObject, DemoManager demos, DemoCatalog catalog, HeadPoseFusion fusion,
-            StereoRig rig, PassthroughController passthrough, RoomBoundary boundary, GameObject origin, SettingsSummoner settings)
+            StereoRig rig, PassthroughController passthrough, RoomBoundary boundary, GameObject origin, SettingsSummoner settings,
+            ShizukuOnboardingController onboarding, MediaControllerWindow mediaWindow,
+            NotificationOverlayController notifOverlay, NotificationCenterWindow notifCenter)
         {
             var core = demosObject.AddComponent<CoreServices>();
             var serializedCore = new SerializedObject(core);
@@ -347,11 +423,33 @@ namespace ProjectBootstrap
             serializedDemos.FindProperty("m_Core").objectReferenceValue = core;
             serializedDemos.ApplyModifiedPropertiesWithoutUndo();
 
-            // The lobby's first visit scans the room, then every visit opens the app library.
+            var serializedOnboarding = new SerializedObject(onboarding);
+            serializedOnboarding.FindProperty("m_Fusion").objectReferenceValue = fusion;
+            serializedOnboarding.FindProperty("m_Settings").objectReferenceValue = settings;
+            serializedOnboarding.ApplyModifiedPropertiesWithoutUndo();
+
+            var serializedMedia = new SerializedObject(mediaWindow);
+            serializedMedia.FindProperty("m_Fusion").objectReferenceValue = fusion;
+            serializedMedia.FindProperty("m_Demos").objectReferenceValue = demos;
+            serializedMedia.ApplyModifiedPropertiesWithoutUndo();
+
+            var serializedOverlay = new SerializedObject(notifOverlay);
+            serializedOverlay.FindProperty("m_Fusion").objectReferenceValue = fusion;
+            serializedOverlay.FindProperty("m_Demos").objectReferenceValue = demos;
+            serializedOverlay.FindProperty("m_Gaze").objectReferenceValue = fusion.GetComponent<GazePointer>();
+            serializedOverlay.ApplyModifiedPropertiesWithoutUndo();
+
+            var serializedNotifCenter = new SerializedObject(notifCenter);
+            serializedNotifCenter.FindProperty("m_Fusion").objectReferenceValue = fusion;
+            serializedNotifCenter.FindProperty("m_Demos").objectReferenceValue = demos;
+            serializedNotifCenter.ApplyModifiedPropertiesWithoutUndo();
+
+            // The lobby opens Shizuku onboarding on first launch, then opens the app library.
             var flow = demosObject.AddComponent<LobbyFlow>();
             var serializedFlow = new SerializedObject(flow);
             serializedFlow.FindProperty("m_Core").objectReferenceValue = core;
             serializedFlow.FindProperty("m_Library").objectReferenceValue = demosObject.GetComponent<AppLibrary>();
+            serializedFlow.FindProperty("m_ShizukuOnboarding").objectReferenceValue = onboarding;
             serializedFlow.ApplyModifiedPropertiesWithoutUndo();
         }
 
@@ -378,8 +476,6 @@ namespace ProjectBootstrap
 
             var planes = origin.AddComponent<ARPlaneManager>();
             planes.planePrefab = prefab;
-            // Floors, tables and seats only: walls and other vertical patches cluttered the room and
-            // caught the hand's ray, and an unseen plane blocking it was hard to tell from a miss.
             planes.requestedDetectionMode = PlaneDetectionMode.Horizontal;
             // RoomBoundary turns it on in 6DoF.
             planes.enabled = false;
@@ -453,10 +549,32 @@ namespace ProjectBootstrap
             serialized.ApplyModifiedPropertiesWithoutUndo();
         }
 
+        // Hybrid Depth + ARRaycast + Plane surface locator and 3D placement reticle for Sandbox and Portal.
+        static void BuildSpatialLocator(GameObject origin, HeadPoseFusion fusion, RoomBoundary boundary,
+            Camera arCamera, Shader placementReticleShader)
+        {
+            var reticleMaterial = SaveAsset(new Material(placementReticleShader) { name = "Placement Reticle" },
+                $"{GeneratedFolder}/Placement Reticle.mat");
+
+            var raycasts = origin.AddComponent<ARRaycastManager>();
+            raycasts.enabled = false;
+
+            var locator = origin.AddComponent<SpatialSurfaceLocator>();
+            var serialized = new SerializedObject(locator);
+            serialized.FindProperty("m_Fusion").objectReferenceValue = fusion;
+            serialized.FindProperty("m_Boundary").objectReferenceValue = boundary;
+            serialized.FindProperty("m_Placer").objectReferenceValue = origin.GetComponent<AnchorPlacer>();
+            serialized.FindProperty("m_Raycasts").objectReferenceValue = raycasts;
+            serialized.FindProperty("m_Planes").objectReferenceValue = origin.GetComponent<ARPlaneManager>();
+            serialized.FindProperty("m_Occlusion").objectReferenceValue = arCamera.GetComponent<AROcclusionManager>();
+            serialized.FindProperty("m_ReticleMaterial").objectReferenceValue = reticleMaterial;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+        }
+
         // Camera-based hand tracking in 6DoF, shown as dots on the joints. In passthrough the camera
         // image moves to the tracked hand's distance.
         static void BuildHands(GameObject origin, HeadPoseFusion fusion, ArPoseSource poseSource, Camera arCamera,
-            PassthroughController passthrough, Shader unlit)
+            PassthroughController passthrough, Shader unlit, Shader handSilhouetteShader)
         {
             var detector = AssetDatabase.LoadAssetAtPath<ModelAsset>(HandDetectorPath);
             var landmarker = AssetDatabase.LoadAssetAtPath<ModelAsset>(HandLandmarkerPath);
@@ -503,15 +621,7 @@ namespace ProjectBootstrap
             serializedStudy.FindProperty("m_Head").objectReferenceValue = fusion.transform;
             serializedStudy.ApplyModifiedPropertiesWithoutUndo();
 
-            var view = new GameObject("Hand Joints").AddComponent<HandJointsView>();
-            var serializedView = new SerializedObject(view);
-            serializedView.FindProperty("m_Tracker").objectReferenceValue = tracker;
-            serializedView.FindProperty("m_Feed").objectReferenceValue = feed;
-            serializedView.FindProperty("m_Passthrough").objectReferenceValue = passthrough;
-            serializedView.FindProperty("m_Material").objectReferenceValue = CreateMaterial("Hand Joint", unlit, Color.white, null);
-            serializedView.ApplyModifiedPropertiesWithoutUndo();
-
-            // Pinch-to-click in 3DoF from a plain camera feed, which PinchInput runs whenever in 3DoF.
+            // Pinch-to-click in 3DoF / Ultrawide from the camera feed.
             var pinchSensor = origin.AddComponent<PinchSensor>();
             var serializedPinch = new SerializedObject(pinchSensor);
             serializedPinch.FindProperty("m_Fusion").objectReferenceValue = fusion;
@@ -520,6 +630,18 @@ namespace ProjectBootstrap
             serializedPinch.FindProperty("m_Landmarker").objectReferenceValue = landmarker;
             serializedPinch.ApplyModifiedPropertiesWithoutUndo();
             pinchSensor.enabled = false;
+
+            var silhouetteMat = SaveAsset(new Material(handSilhouetteShader) { name = "Hand Silhouette" },
+                $"{GeneratedFolder}/Hand Silhouette.mat");
+            var view = new GameObject("Hand Joints").AddComponent<HandJointsView>();
+            var serializedView = new SerializedObject(view);
+            serializedView.FindProperty("m_Tracker").objectReferenceValue = tracker;
+            serializedView.FindProperty("m_Feed").objectReferenceValue = feed;
+            serializedView.FindProperty("m_Sensor").objectReferenceValue = pinchSensor;
+            serializedView.FindProperty("m_Fusion").objectReferenceValue = fusion;
+            serializedView.FindProperty("m_Passthrough").objectReferenceValue = passthrough;
+            serializedView.FindProperty("m_Material").objectReferenceValue = silhouetteMat;
+            serializedView.ApplyModifiedPropertiesWithoutUndo();
             var pinchInput = origin.AddComponent<PinchInput>();
             var serializedInput = new SerializedObject(pinchInput);
             serializedInput.FindProperty("m_Fusion").objectReferenceValue = fusion;
@@ -645,6 +767,28 @@ namespace ProjectBootstrap
             serialized.ApplyModifiedPropertiesWithoutUndo();
         }
 
+        // 360-degree Isolation / Environments mode (Poly Haven dynamic HDRIs + Dark Cinema).
+        static void BuildEnvironment(EnvironmentManager environment, HeadPoseFusion fusion,
+            PassthroughController passthrough, M3Button toggle, M3Button nextButton, Shader domeShader)
+        {
+            var serialized = new SerializedObject(environment);
+            serialized.FindProperty("m_Fusion").objectReferenceValue = fusion;
+            serialized.FindProperty("m_Passthrough").objectReferenceValue = passthrough;
+            serialized.FindProperty("m_DomeShader").objectReferenceValue = domeShader;
+            serialized.FindProperty("m_Toggle").objectReferenceValue = toggle;
+            serialized.FindProperty("m_NextButton").objectReferenceValue = nextButton;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+        }
+
+        // Quick-toggle rear LED flashlight in the main toolbar.
+        static void BuildTorch(TorchManager torch, PassthroughController passthrough, M3Button toggle)
+        {
+            var serialized = new SerializedObject(torch);
+            serialized.FindProperty("m_Passthrough").objectReferenceValue = passthrough;
+            serialized.FindProperty("m_Toggle").objectReferenceValue = toggle;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+        }
+
         // Why a pinch isn't registering, when it isn't: an M3 plain tooltip under the reticle, held with
         // the head and nearer than any panel (PinchInput shows it). Hidden to start.
         static GameObject BuildHandHint(Transform head)
@@ -652,13 +796,13 @@ namespace ProjectBootstrap
             const float distance = 1f;
             const float below = 7f;
             var size = new Vector2(320f, 40f);
-            var hint = M3.Canvas("Hand Hint", head, size, distance, M3Theme.InverseSurface, M3Theme.k_ShapeSmall);
+            var hint = M3.Canvas("Hand Hint", head, size, distance, M3Theme.SurfaceContainerHigh, M3Theme.k_ShapeFull);
             var direction = Quaternion.Euler(below, 0f, 0f) * Vector3.forward;
             hint.localPosition = direction * distance;
             hint.localRotation = Quaternion.LookRotation(direction, Vector3.up);
-            M3.Icon("Icon", hint, "pinch", 20f, new Vector2(-size.x / 2f + 12f + 10f, 0f), M3Theme.InverseOnSurface);
+            M3.Icon("Icon", hint, "pinch", 20f, new Vector2(-size.x / 2f + 16f + 10f, 0f), M3Theme.OnSurface);
             M3.Text("Label", hint, "Raise your hand into view to pinch", M3Theme.Type.BodyMedium, new Vector2(16f, 0f),
-                new Vector2(size.x - 56f, 24f), M3Theme.InverseOnSurface);
+                new Vector2(size.x - 56f, 24f), M3Theme.OnSurface);
             hint.gameObject.SetActive(false);
             return hint.gameObject;
         }
@@ -749,6 +893,7 @@ namespace ProjectBootstrap
             var renderer = quad.GetComponent<MeshRenderer>();
             renderer.shadowCastingMode = ShadowCastingMode.Off;
             renderer.receiveShadows = false;
+            renderer.sortingOrder = UiRenderQueue.k_ScreenFadeSortingOrder;
             var fade = quad.AddComponent<ScreenFade>();
             var serialized = new SerializedObject(demos);
             serialized.FindProperty("m_Fade").objectReferenceValue = fade;
@@ -764,6 +909,7 @@ namespace ProjectBootstrap
             var renderer = reticleObject.GetComponent<MeshRenderer>();
             renderer.shadowCastingMode = ShadowCastingMode.Off;
             renderer.receiveShadows = false;
+            renderer.sortingOrder = UiRenderQueue.k_ReticleSortingOrder;
             var reticle = reticleObject.AddComponent<GazeReticle>();
 
             var pointer = head.AddComponent<GazePointer>();
@@ -776,57 +922,80 @@ namespace ProjectBootstrap
         }
 
         // Core's controls, as a Material floating toolbar: icon-and-label items on a pill-shaped surface,
-        // in three groups split by dividers: Apps, which shows the app library above it; the actions,
-        // Recenter and Scan Room (6DoF only); and the toggles, 6DoF and Passthrough, shown selected
-        // while on. (Pinching is always on: see PinchInput.) M3Toolbar lays out only the items
-        // showing. Scan Room is added once the room boundary exists, then ArrangeToolbar finishes it.
-        // Returns the items (Apps, Recenter, 6DoF, Passthrough, then one empty for Scan Room) and the panel.
-        static (M3Button[] items, RectTransform panel) BuildToolbar(HeadPoseFusion fusion,
-            PassthroughController passthrough, DemoManager demos)
+        // in three groups split by dividers: Apps (toggles the app library above it), Scan Room (shown
+        // only inside apps that need surface scanning), Ambienti (360-degree Isolation mode + Cambia),
+        // and Torcia (quick LED flashlight toggle).
+        static (M3Button[] items, RectTransform panel, RectTransform clockSlot, TMP_Text clockText,
+            TMP_Text batteryText, GameObject notifBadge, TMP_Text notifBadgeText) BuildToolbar(EnvironmentManager environment,
+            TorchManager torch, DemoManager demos, MediaControllerWindow mediaWindow, NotificationCenterWindow notifCenter)
         {
             // Low, out of the way, until SettingsSummoner opens it in front of the user.
             const float pitch = -30f;
-            var panel = M3.Canvas("Gaze Panel", null, new Vector2(600f, k_ToolbarHeight), M3Theme.k_OverlayDistance,
+            var panel = M3.Canvas("Gaze Panel", null, new Vector2(620f, k_ToolbarHeight), M3Theme.k_OverlayDistance,
                 M3Theme.SurfaceContainerHigh, M3Theme.k_ShapeFull);
             panel.gameObject.AddComponent<GazeCanvas>();
             // In front of the origin, where the head starts, tilted to face it.
             var direction = Quaternion.Euler(-pitch, 0f, 0f) * Vector3.forward;
             panel.SetPositionAndRotation(direction * M3Theme.k_OverlayDistance, Quaternion.LookRotation(direction, Vector3.up));
 
-            // The view switch isn't here: it's on the screen itself, in the settings menu, since it's
-            // pressed with the phone in hand where this panel can't be reached.
-            var items = new M3Button[5];
-            // Apps shows the app library above the panel (BuildLibrary), the way to the lobby and
-            // between demos.
+            var clockSlot = M3.Group("Clock", panel, new Vector2(0f, k_ToolbarItemY), new Vector2(k_ToolbarItemWidth, k_ToolbarItemHeight));
+            var clockText = M3.Text("ClockText", clockSlot, "--:--", M3Theme.Type.TitleMedium,
+                new Vector2(0f, 9f), new Vector2(k_ToolbarItemWidth, 24f), M3Theme.OnSurface, TextAlignmentOptions.Center);
+            clockText.fontSize = 18f;
+            clockText.textWrappingMode = TextWrappingModes.NoWrap;
+            var batteryText = M3.Text("BatteryText", clockSlot, "", M3Theme.Type.LabelLarge,
+                new Vector2(0f, -13f), new Vector2(k_ToolbarItemWidth, 18f), M3Theme.OnSurfaceVariant, TextAlignmentOptions.Center);
+            batteryText.fontSize = 12f;
+            batteryText.textWrappingMode = TextWrappingModes.NoWrap;
+
+            var items = new M3Button[8];
             var library = demos.gameObject.AddComponent<AppLibrary>();
             items[0] = ToolbarItem(panel, "Apps", "apps", "Apps", library.Toggle);
-            items[1] = ToolbarItem(panel, "Recenter", "my_location", "Recenter", fusion.Recenter);
-            items[2] = ToolbarItem(panel, "Tracking Mode", "view_in_ar", "6DoF", fusion.ToggleMode);
-            items[3] = ToolbarItem(panel, "Passthrough", "visibility", "Passthrough", passthrough.Toggle);
-            return (items, panel);
+            items[1] = ToolbarItem(panel, "Environment", "landscape", "Ambienti", environment.OpenPicker);
+            items[3] = ToolbarItem(panel, "ExitEnvironment", "view_in_ar", "Esci", environment.ExitEnvironment);
+            items[3].gameObject.SetActive(false);
+            items[4] = ToolbarItem(panel, "Torch", "flashlight_on", "Torcia", torch.Toggle);
+            items[5] = ToolbarItem(panel, "Reorder", "swap_horiz", "Riordina", library.ToggleReorderMode);
+            items[6] = ToolbarItem(panel, "Media", "music_note", "Media", mediaWindow.Toggle);
+            items[7] = ToolbarItem(panel, "Notifications", "notifications", "Notifiche", notifCenter.Toggle);
+
+            var badgeImg = M3.Surface("Badge", (RectTransform)items[7].transform, new Vector2(15f, 19f),
+                new Vector2(18f, 18f), new Color(0.92f, 0.24f, 0.28f, 1f), M3Theme.k_ShapeFull,
+                raycastTarget: false, style: VisionSurfaceStyle.Glossy);
+            var badgeText = M3.Text("Count", badgeImg.rectTransform, "0", M3Theme.Type.LabelLarge,
+                Vector2.zero, new Vector2(18f, 18f), Color.white, TextAlignmentOptions.Center);
+            badgeText.fontSize = 10.5f;
+            badgeImg.gameObject.SetActive(false);
+
+            return (items, panel, clockSlot, clockText, batteryText, badgeImg.gameObject, badgeText);
         }
 
-        const float k_ToolbarItemWidth = 92f;
-        const float k_ToolbarPadding = 12f;
+        const float k_ToolbarItemWidth = 68f;
+        const float k_ToolbarItemHeight = 56f;
+        const float k_ToolbarPadding = 8f;
+        const float k_ToolbarDividerGap = 10f;
+        const float k_ToolbarDividerHeight = 30f;
         const float k_ToolbarItemY = 0f;
-        // The items' 76 dp and the padding around them.
-        const float k_ToolbarHeight = 76f + 2f * k_ToolbarPadding;
+        // Compact pill height (72 dp), matching the look-up quick bar.
+        const float k_ToolbarHeight = k_ToolbarItemHeight + 2f * k_ToolbarPadding;
 
         static M3Button ToolbarItem(RectTransform panel, string name, string icon, string label, UnityAction onClick) =>
-            M3.ToolbarItem(name, panel, icon, label, new Vector2(0f, k_ToolbarItemY), k_ToolbarItemWidth, onClick);
+            M3.ToolbarItem(name, panel, icon, label, new Vector2(0f, k_ToolbarItemY), k_ToolbarItemWidth, onClick,
+                height: k_ToolbarItemHeight, indicatorWidth: 46f, indicatorHeight: 28f, iconSize: 20f, labelFontSize: 11.5f);
 
         // The toolbar as the app's settings panel, summoned anywhere (SettingsSummoner): a round gear
         // button that appears between thumb and index finger while a palm faces the user, and a round
         // X under the panel to close it.
-        static SettingsSummoner BuildSettings(GameObject origin, HeadPoseFusion fusion, RectTransform panel)
+        static SettingsSummoner BuildSettings(GameObject origin, HeadPoseFusion fusion, RectTransform panel,
+            TMP_Text clockText, TMP_Text batteryText, M3Button mediaBtn, M3Button notifBtn, GameObject notifBadge, TMP_Text notifBadgeText)
         {
             var summoner = origin.AddComponent<SettingsSummoner>();
             // Shown by hand, not looked at, so it has no GazeCanvas. At arm's length, sized for there.
             var button = M3.Canvas("Settings Button", null, new Vector2(48f, 48f), 0.4f);
-            M3.IconButton("Gear", button, "settings", M3Button.Variant.Filled, Vector2.zero, null, 48f);
+            M3.IconButton("Apps", button, "apps", M3Button.Variant.Filled, Vector2.zero, null, 48f);
             // Orbiter distance under the panel.
             var close = M3.IconButton("Close", panel, "close", M3Button.Variant.Tonal,
-                new Vector2(0f, -(k_ToolbarHeight / 2f + 20f + M3Theme.k_Target / 2f)), summoner.Close);
+                new Vector2(0f, -(k_ToolbarHeight / 2f + 12f + 22f)), summoner.Close, 44f);
             close.Button.navigation = new Navigation { mode = Navigation.Mode.None };
 
             var serialized = new SerializedObject(summoner);
@@ -835,27 +1004,29 @@ namespace ProjectBootstrap
             serialized.FindProperty("m_Sensor").objectReferenceValue = origin.GetComponent<PinchSensor>();
             serialized.FindProperty("m_Panel").objectReferenceValue = panel;
             serialized.FindProperty("m_Button").objectReferenceValue = button;
+            serialized.FindProperty("m_ToolbarClockText").objectReferenceValue = clockText;
+            serialized.FindProperty("m_ToolbarBatteryText").objectReferenceValue = batteryText;
+            serialized.FindProperty("m_ToolbarMediaBtn").objectReferenceValue = mediaBtn;
+            serialized.FindProperty("m_ToolbarNotifBtn").objectReferenceValue = notifBtn;
+            serialized.FindProperty("m_ToolbarNotifBadge").objectReferenceValue = notifBadge;
+            serialized.FindProperty("m_ToolbarNotifBadgeText").objectReferenceValue = notifBadgeText;
             serialized.ApplyModifiedPropertiesWithoutUndo();
             return summoner;
         }
 
-        // The app library: a surface above the settings panel, part of it, so it follows and closes
-        // with it, hidden until Apps shows it. AppLibrary puts the tiles in at runtime, from the catalog.
-        // How opaque the library's surface is: enough to keep the names readable over a busy room.
-        const float k_LibraryOpacity = 0.6f;
-
+        // The app library: visionOS Home View with circular glossy app icons floating cleanly in
+        // space above the settings toolbar (transparent backing in floating mode; frosted glass sheet in palm mode).
         static void BuildLibrary(RectTransform panel, DemoManager demos, SettingsSummoner settings, M3Button appsButton,
-            DemoCatalog catalog)
+            M3Button reorderButton, DemoCatalog catalog)
         {
             var size = AppLibrary.Size(catalog.Demos.Count + 1);
-            // Translucent, like visionOS's glass: the room (or scene) shows through behind the icons. Part
-            // of the panel, but placed by SettingsSummoner at eye level, upright, with the panel below.
-            var root = M3.Surface("App Library", panel, Vector2.zero, size, M3Theme.WithAlpha(M3Theme.SurfaceContainer, k_LibraryOpacity),
-                M3Theme.k_ShapePanel, raycastTarget: true).rectTransform;
+            var root = M3.Surface("App Library", panel, Vector2.zero, size, Color.clear,
+                M3Theme.k_ShapePanel, raycastTarget: true, style: VisionSurfaceStyle.Frosted).rectTransform;
             root.gameObject.AddComponent<M3Fade>();
             var grid = M3.Group("Grid", root, Vector2.zero, size);
             var tagline = M3.Text("Tagline", root, "", M3Theme.Type.BodyMedium, new Vector2(0f, -size.y / 2f + 16f + 14f),
-                new Vector2(size.x - 32f, 28f), M3Theme.OnSurfaceVariant);
+                new Vector2(size.x - 36f, 28f), M3Theme.OnSurfaceVariant);
+            tagline.gameObject.SetActive(false);
             root.gameObject.SetActive(false);
 
             var serializedSettings = new SerializedObject(settings);
@@ -867,6 +1038,7 @@ namespace ProjectBootstrap
             serialized.FindProperty("m_Demos").objectReferenceValue = demos;
             serialized.FindProperty("m_Settings").objectReferenceValue = settings;
             serialized.FindProperty("m_AppsButton").objectReferenceValue = appsButton;
+            serialized.FindProperty("m_ReorderButton").objectReferenceValue = reorderButton;
             serialized.FindProperty("m_Root").objectReferenceValue = root;
             serialized.FindProperty("m_Grid").objectReferenceValue = grid;
             serialized.FindProperty("m_Tagline").objectReferenceValue = tagline;
@@ -874,22 +1046,30 @@ namespace ProjectBootstrap
         }
 
         // Orders the items into their groups, with a divider before each group after the first.
-        static void ArrangeToolbar(RectTransform panel, M3Button[] items)
+        static void ArrangeToolbar(RectTransform panel, RectTransform clockSlot, M3Button[] items)
         {
-            // Apps | Recenter, Scan Room | 6DoF, Passthrough.
-            var order = new[] { items[0], items[1], items[4], items[2], items[3] };
-            var groups = new[] { 0, 1, 1, 2, 2 };
-            var dividers = new Image[3];
+            // Clock | Apps, Riordina | Scan Room (conditional) | Ambienti, Cambia (conditional), Torcia, Media, Notifiche.
+            var rects = new[]
+            {
+                clockSlot,
+                (RectTransform)items[0].transform,
+                (RectTransform)items[5].transform,
+                (RectTransform)items[2].transform,
+                (RectTransform)items[1].transform,
+                (RectTransform)items[3].transform,
+                (RectTransform)items[4].transform,
+                (RectTransform)items[6].transform,
+                (RectTransform)items[7].transform,
+            };
+            var groups = new[] { 0, 1, 1, 2, 3, 3, 3, 3, 3 };
+            var dividers = new Image[4];
             for (var g = 1; g < dividers.Length; g++)
             {
-                dividers[g] = M3.Surface($"Divider {g}", panel, Vector2.zero, new Vector2(1f, M3Toolbar.k_DividerHeight),
-                    M3Theme.OutlineVariant, 0f);
+                dividers[g] = M3.Surface($"Divider {g}", panel, Vector2.zero, new Vector2(1f, k_ToolbarDividerHeight),
+                    M3Theme.OutlineVariant, 0f, style: VisionSurfaceStyle.Pure);
             }
-            var rects = new RectTransform[order.Length];
-            for (var i = 0; i < order.Length; i++)
-                rects[i] = (RectTransform)order[i].transform;
             panel.gameObject.AddComponent<M3Toolbar>().Initialize(rects, groups, dividers, new RectTransform[0], k_ToolbarItemWidth,
-                k_ToolbarPadding, k_ToolbarItemY);
+                k_ToolbarPadding, k_ToolbarItemY, k_ToolbarDividerGap);
         }
 
         internal static GameObject CreatePrimitive(PrimitiveType type, string name, Transform parent, Material material, bool keepCollider = false)

@@ -72,5 +72,15 @@ namespace CardboardXR.Stereo.Tests
                 UnityEngine.Object.DestroyImmediate(catalog);
             }
         }
+
+        [Test]
+        public void RemovedDemosAreAbsentFromProjectDemoCatalog()
+        {
+            var catalog = UnityEditor.AssetDatabase.LoadAssetAtPath<DemoCatalog>("Assets/_Project/Demos/DemoCatalog.asset");
+            if (catalog == null)
+                Assert.Ignore("DemoCatalog.asset not present");
+            Assert.AreEqual(-1, catalog.IndexOf("sandbox"));
+            Assert.AreEqual(-1, catalog.IndexOf("rush"));
+        }
     }
 }
